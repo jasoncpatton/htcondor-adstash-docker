@@ -1,0 +1,2 @@
+LOG = /tmp
+ADSTASH_DEBUG = D_ALL:2

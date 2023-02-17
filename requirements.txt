@@ -1,3 +1,3 @@
-htcondor
-elasticsearch
+htcondor==HTCONDOR_VERSION
+elasticsearch>=7.17.9,<8
 certifi
