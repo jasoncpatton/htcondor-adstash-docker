@@ -1,6 +1,6 @@
 FROM python:3.10-slim-bullseye
 ARG HTCONDOR_RELEASE=10.x
-ARG HTCONDOR_VERSION=10.2.1
+ARG HTCONDOR_VERSION=10.2.3
 
 # set up adstash user
 ENV ADSTASH_USER=adstash
