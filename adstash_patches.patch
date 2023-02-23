@@ -1,0 +1,66 @@
+diff --git a/src/condor_scripts/adstash/convert.py b/src/condor_scripts/adstash/convert.py
+index 68c828d4fe..bea4ac2876 100644
+--- a/src/condor_scripts/adstash/convert.py
++++ b/src/condor_scripts/adstash/convert.py
+@@ -17,6 +17,7 @@ import re
+ import json
+ import time
+ import logging
++from functools import lru_cache
+ 
+ import classad
+ 
+@@ -64,8 +65,13 @@ INDEXED_KEYWORD_ATTRS = {
+     "MATCH_EXP_JOBGLIDEIN_ResourceName",
+     "MATCH_EXP_JOB_GLIDECLIENT_Name",
+     "MATCH_EXP_JOB_GLIDEIN_ClusterId",
++    "MATCH_EXP_JOB_GLIDEIN_ProcId",
+     "MATCH_EXP_JOB_GLIDEIN_Entry_Name",
+     "MATCH_EXP_JOB_GLIDEIN_Factory",
++    "MATCH_EXP_JOB_GLIDEIN_Job_Max_Time",
++    "MATCH_EXP_JOB_GLIDEIN_MaxMemMBs",
++    "MATCH_EXP_JOB_GLIDEIN_Max_Walltime",
++    "MATCH_EXP_JOB_GLIDEIN_Memory",
+     "MATCH_EXP_JOB_GLIDEIN_Name",
+     "MATCH_EXP_JOB_GLIDEIN_SEs",
+     "MATCH_EXP_JOB_GLIDEIN_Schedd",
+@@ -74,6 +80,8 @@ INDEXED_KEYWORD_ATTRS = {
+     "MATCH_EXP_JOB_GLIDEIN_SiteWMS_JobId",
+     "MATCH_EXP_JOB_GLIDEIN_SiteWMS_Queue",
+     "MATCH_EXP_JOB_GLIDEIN_SiteWMS_Slot",
++    "MATCH_EXP_JOB_GLIDEIN_ToDie",
++    "MATCH_EXP_JOB_GLIDEIN_ToRetire",
+     "MyType",
+     "NTDomain",
+     "OAuthServicesNeeded",
+@@ -231,13 +239,6 @@ INT_ATTRS = {
+     "MachineAttrCpus0",
+     "MachineAttrSlotWeight0",
+     "MachineCount",
+-    "MATCH_EXP_JOB_GLIDEIN_Job_Max_Time",
+-    "MATCH_EXP_JOB_GLIDEIN_MaxMemMBs",
+-    "MATCH_EXP_JOB_GLIDEIN_Max_Walltime",
+-    "MATCH_EXP_JOB_GLIDEIN_Memory",
+-    "MATCH_EXP_JOB_GLIDEIN_ProcId",
+-    "MATCH_EXP_JOB_GLIDEIN_ToDie",
+-    "MATCH_EXP_JOB_GLIDEIN_ToRetire",
+     "MaxHosts",
+     "MaxJobRetirementTime",
+     "MaxTransferInputMB",
+@@ -569,6 +570,7 @@ KNOWN_ATTRS = (
+ KNOWN_ATTRS_MAP = {x.casefold(): x for x in KNOWN_ATTRS}
+ 
+ 
++@lru_cache(maxsize=1024)
+ def case_normalize(attr):
+     """
+     Given a ClassAd attr name, check to see if it's known. If so, normalize the
+@@ -620,7 +622,7 @@ def bulk_convert_ad_data(ad, result):
+         # Do not return invalid expressions
+         try:
+             value = ad.eval(key)
+-        except:
++        except Exception:
+             continue
+ 
+         if isinstance(value, classad.Value):

@@ -20,18 +20,21 @@ RUN pip install --upgrade pip && \
 
 # install packages
 RUN apt-get update && \
-    apt-get install -y curl supervisor && \
+    apt-get install -y git curl supervisor && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# install condor_adstash from the source tree
+# install condor_adstash
 ARG HTCONDOR_TARBALL=https://research.cs.wisc.edu/htcondor/tarball/${HTCONDOR_RELEASE}/${HTCONDOR_VERSION}/release/condor-${HTCONDOR_VERSION}-src.tar.gz
-RUN mkdir -p ${ADSTASH_PATH}/bin ${ADSTASH_PATH}/lib && \
-    curl -k -L ${HTCONDOR_TARBALL} > /tmp/htcondor.tar.gz && \
-    tar -xf /tmp/htcondor.tar.gz --strip-components=1 --directory=/tmp && \
-    mv /tmp/src/condor_scripts/condor_adstash ${ADSTASH_BIN} && \
-    mv /tmp/src/condor_scripts/adstash ${ADSTASH_LIB} && \
-    rm -rf /tmp/* && \
+ARG TMPDIR=/tmp/setup
+COPY adstash_patches.patch $TMPDIR/adstash_patches.patch
+RUN mkdir -p ${TMPDIR} ${ADSTASH_PATH}/bin ${ADSTASH_PATH}/lib && \
+    curl -k -L ${HTCONDOR_TARBALL} > ${TMPDIR}/htcondor.tar.gz && \
+    tar -xf ${TMPDIR}/htcondor.tar.gz --strip-components=1 --directory=${TMPDIR} && \
+    git apply --directory ${TMPDIR} --unsafe-paths ${TMPDIR}/adstash_patches.patch && \
+    mv ${TMPDIR}/src/condor_scripts/condor_adstash ${ADSTASH_BIN} && \
+    mv ${TMPDIR}/src/condor_scripts/adstash ${ADSTASH_LIB} && \
+    rm -rf ${TMPDIR} && \
     chmod 0755 ${ADSTASH_BIN}/condor_adstash
 
 # set up supervisord
