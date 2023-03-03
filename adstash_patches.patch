@@ -74,10 +74,34 @@ index d5e30b0924..895ce610f9 100644
          endtime = time.time()
          logging.warning(f"Schedd {schedd_ad['Name']} history: response count: {ads_posted}; upload time: {(endtime-starttime)/60:.2f} min")
 diff --git a/src/condor_scripts/adstash/adstash.py b/src/condor_scripts/adstash/adstash.py
-index 2a36612e4a..b304b59924 100644
+index 2a36612e4a..a0444b9609 100644
 --- a/src/condor_scripts/adstash/adstash.py
 +++ b/src/condor_scripts/adstash/adstash.py
-@@ -188,10 +188,26 @@ def schedd_history_processor(src, schedd_ad, ckpt_queue, iface, metadata, args,
+@@ -97,6 +97,7 @@ def adstash(args):
+                 while True:
+                     try:
+                         checkpoint = checkpoint_queue.get()
++                        logging.debug(f"Got checkpoint {checkpoint}")
+                         if checkpoint is None:
+                             break
+                     except EOFError as e:
+@@ -110,6 +111,7 @@ def adstash(args):
+             # Report processes if they timeout or error
+             for name, future in futures:
+                 try:
++                    logging.debug(f"Getting progress from {name}.")
+                     future.get(args.schedd_history_timeout)
+                 except multiprocessing.TimeoutError:
+                     logging.warning(f"Schedd {name} history timed out; ignoring progress.")
+@@ -117,6 +119,7 @@ def adstash(args):
+                     logging.exception(f"Error getting progress from {name}.")
+ 
+             checkpoint_queue.put(None)
++            logging.debug("Joining the checkpoint queue.")
+             ckpt_updater.join()
+ 
+         logging.warning(f"Processing time for schedd history: {(time.time()-schedd_starttime)/60:.2f} mins")
+@@ -188,10 +191,28 @@ def schedd_history_processor(src, schedd_ad, ckpt_queue, iface, metadata, args,
      metadata["condor_history_host_platform"] = schedd_ad.get("CondorPlatform", "UNKNOWN")
      metadata["condor_history_host_machine"] = schedd_ad.get("Machine", "UNKNOWN")
      metadata["condor_history_host_name"] = schedd_ad.get("Name", "UNKNOWN")
@@ -92,6 +116,7 @@ index 2a36612e4a..b304b59924 100644
 +        err_ckpt["AdFetchLastError"] = f"{e.__class__.__name__}: {str(e)}"
 +        err_ckpt["AdFetchConsecutiveErrorCount"] = err_ckpt.get("AdFetchConsecutiveErrorCount", 0) + 1
 +        ckpt_queue.put({schedd_ad["Name"]: err_ckpt})
++        logging.error(f"Could not fetch ads from {schedd_ad['Name']}, see checkpoint file for more info.")
 +        return
 +    else:
 +        if ads is None:
@@ -105,6 +130,7 @@ index 2a36612e4a..b304b59924 100644
 +        err_ckpt["AdProcessLastError"] = f"{e.__class__.__name__}: {str(e)}"
 +        err_ckpt["AdProcessConsecutiveErrorCount"] = err_ckpt.get("AdProcessConsecutiveErrorCount", 0) + 1
 +        ckpt_queue.put({schedd_ad["Name"]: err_ckpt})
++        logging.error(f"Could not push ads from {schedd_ad['Name']}, see checkpoint file for more info.")
  
  
  def startd_history_processor(src, startd_ad, ckpt_queue, iface, metadata, args, src_kwargs):
