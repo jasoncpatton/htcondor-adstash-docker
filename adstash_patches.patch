@@ -1,8 +1,8 @@
 diff --git a/src/condor_scripts/adstash/ad_sources/schedd_history.py b/src/condor_scripts/adstash/ad_sources/schedd_history.py
-index d5e30b0924..895ce610f9 100644
+index d5e30b0924..253ea47565 100644
 --- a/src/condor_scripts/adstash/ad_sources/schedd_history.py
 +++ b/src/condor_scripts/adstash/ad_sources/schedd_history.py
-@@ -26,13 +26,16 @@ from adstash.convert import to_json, unique_doc_id
+@@ -26,18 +26,21 @@ from adstash.convert import to_json, unique_doc_id
  class ScheddHistorySource(GenericAdSource):
  
  
@@ -14,22 +14,31 @@ index d5e30b0924..895ce610f9 100644
  
 -        ckpt = self.checkpoint.get(schedd_ad["Name"])
 -        if ckpt is None:
+-            logging.warning(f"No checkpoint found for schedd {schedd_ad['Name']}, getting all ads available.")
 +        ckpt = self.checkpoint.get(schedd_ad["Name"], {})
 +        if ckpt.get("AdFetchConsecutiveErrorCount", 0) + ckpt.get("AdProcessConsecutiveErrorCount", 0) > max_error_count:
 +            logging.warning(f"{schedd_ad['Name']} has exceeded max consecutive error count ({max_error_count}), skipping...")
 +            return None
 +        if not {"ClusterId", "ProcId"}.issubset(ckpt):
-             logging.warning(f"No checkpoint found for schedd {schedd_ad['Name']}, getting all ads available.")
++            logging.warning(f"No checkpoint found for Schedd {schedd_ad['Name']}, getting all ads available.")
          else:
              since_expr = f"""(ClusterId == {ckpt["ClusterId"]}) && (ProcId == {ckpt["ProcId"]})"""
-@@ -69,15 +72,44 @@ class ScheddHistorySource(GenericAdSource):
+             history_kwargs["since"] = since_expr
+-            logging.warning(f"Getting ads from {schedd_ad['Name']} since {since_expr}.")
++            logging.warning(f"Getting ads from Schedd {schedd_ad['Name']} since {since_expr}.")
+         schedd = htcondor.Schedd(schedd_ad)
+         return schedd.history(constraint=True, projection=[], **history_kwargs)
+ 
+@@ -68,16 +71,45 @@ class ScheddHistorySource(GenericAdSource):
+             chunk.append((unique_doc_id(dict_ad), dict_ad,))
  
              if (chunk_size > 0) and (len(chunk) >= chunk_size):
-                 logging.debug(f"Posting {len(chunk)} ads from {schedd_ad['Name']}.")
+-                logging.debug(f"Posting {len(chunk)} ads from {schedd_ad['Name']}.")
 -                result = interface.post_ads(chunk, metadata=metadata, **kwargs)
 -                ads_posted += result["success"]
 -                yield None  # don't update checkpoint yet, per note above
 -                chunk = []
++                logging.debug(f"Posting {len(chunk)} ads from Schedd {schedd_ad['Name']}.")
 +                # Try posting ads three times before giving up
 +                tries = 3
 +                while tries > 0:
@@ -38,9 +47,9 @@ index d5e30b0924..895ce610f9 100644
 +                    except Exception as e:
 +                        tries -= 1
 +                        if tries > 0:
-+                            logging.warning(f"Got {e.__class__.__name__} ({str(e)}) while posting ads from {schedd_ad['Name']}, trying {tries} more times...")
++                            logging.warning(f"Got {e.__class__.__name__} ({str(e)}) while posting ads from Schedd {schedd_ad['Name']}, trying {tries} more times...")
 +                        else:
-+                            message = f"Got {e.__class__.__name__} ({str(e)}) while posting ads from {schedd_ad['Name']}, out of retires, giving up..."
++                            message = f"Got {e.__class__.__name__} ({str(e)}) while posting ads from Schedd {schedd_ad['Name']}, out of retires, giving up..."
 +                            exc = traceback.format_exc()
 +                            message += f"\n{exc}"
 +                            logging.warning(message)
@@ -52,9 +61,10 @@ index d5e30b0924..895ce610f9 100644
 +                        chunk = []
  
          if len(chunk) > 0:
-             logging.debug(f"Posting {len(chunk)} ads from {schedd_ad['Name']}.")
+-            logging.debug(f"Posting {len(chunk)} ads from {schedd_ad['Name']}.")
 -            result = interface.post_ads(chunk, metadata=metadata, **kwargs)
 -            ads_posted += result["success"]
++            logging.debug(f"Posting {len(chunk)} ads from Schedd {schedd_ad['Name']}.")
 +            # Try posting ads three times before giving up
 +            tries = 3
 +            while tries > 0:
@@ -63,9 +73,9 @@ index d5e30b0924..895ce610f9 100644
 +                except Exception as e:
 +                    tries -= 1
 +                    if tries > 0:
-+                        logging.warning(f"Got {e.__class__.__name__} ({str(e)}) while posting ads from {schedd_ad['Name']}, trying {tries} more times...")
++                        logging.warning(f"Got {e.__class__.__name__} ({str(e)}) while posting ads from Schedd {schedd_ad['Name']}, trying {tries} more times...")
 +                    else:
-+                        logging.warning(f"Got {e.__class__.__name__} ({str(e)}) while posting ads from {schedd_ad['Name']}, out of retires, giving up...")
++                        logging.warning(f"Got {e.__class__.__name__} ({str(e)}) while posting ads from Schedd {schedd_ad['Name']}, out of retires, giving up...")
 +                        raise e
 +                else:
 +                    tries = 0
@@ -74,34 +84,71 @@ index d5e30b0924..895ce610f9 100644
          endtime = time.time()
          logging.warning(f"Schedd {schedd_ad['Name']} history: response count: {ads_posted}; upload time: {(endtime-starttime)/60:.2f} min")
 diff --git a/src/condor_scripts/adstash/adstash.py b/src/condor_scripts/adstash/adstash.py
-index 2a36612e4a..a0444b9609 100644
+index 2a36612e4a..9e5c860157 100644
 --- a/src/condor_scripts/adstash/adstash.py
 +++ b/src/condor_scripts/adstash/adstash.py
-@@ -97,6 +97,7 @@ def adstash(args):
+@@ -16,6 +16,7 @@
+ import time
+ import logging
+ import multiprocessing
++import queue
+ 
+ from adstash.utils import get_schedds, get_startds, collect_process_metadata
+ from adstash.ad_sources.registry import ADSTASH_AD_SOURCE_REGISTRY
+@@ -79,6 +80,7 @@ def adstash(args):
+         
+         futures = []
+         manager = multiprocessing.Manager()
++        manager.start()
+         checkpoint_queue = manager.Queue()
+ 
+         with multiprocessing.Pool(processes=args.threads, maxtasksperchild=1) as pool:
+@@ -96,13 +98,15 @@ def adstash(args):
+             def _schedd_ckpt_updater():
                  while True:
                      try:
-                         checkpoint = checkpoint_queue.get()
-+                        logging.debug(f"Got checkpoint {checkpoint}")
+-                        checkpoint = checkpoint_queue.get()
++                        checkpoint = checkpoint_queue.get(timeout=args.schedd_history_timeout)
++                    except queue.Empty:
++                        logging.warning(f"Nothing to consume in checkpoint queue in last {args.schedd_history_timeout} seconds, exiting early.")
++                        break
++                    else:
                          if checkpoint is None:
                              break
-                     except EOFError as e:
-@@ -110,6 +111,7 @@ def adstash(args):
+-                    except EOFError as e:
+-                        logging.warning(f"EOFError: Nothing to consume in checkpoint queue {str(e)}")
+-                        break
+-                    ad_source.update_checkpoint(checkpoint)
++                        logging.debug(f"Got checkpoint {checkpoint}")
++                        ad_source.update_checkpoint(checkpoint)
+ 
+             ckpt_updater = multiprocessing.Process(target=_schedd_ckpt_updater)
+             ckpt_updater.start()
+@@ -110,14 +114,20 @@ def adstash(args):
              # Report processes if they timeout or error
              for name, future in futures:
                  try:
-+                    logging.debug(f"Getting progress from {name}.")
++                    logging.warning(f"Waiting for Schedd {name} to finish.")
                      future.get(args.schedd_history_timeout)
                  except multiprocessing.TimeoutError:
-                     logging.warning(f"Schedd {name} history timed out; ignoring progress.")
-@@ -117,6 +119,7 @@ def adstash(args):
-                     logging.exception(f"Error getting progress from {name}.")
+-                    logging.warning(f"Schedd {name} history timed out; ignoring progress.")
++                    logging.warning(f"Waited too long for Schedd {name}; it may still complete in the background.")
+                 except Exception:
+-                    logging.exception(f"Error getting progress from {name}.")
++                    logging.exception(f"Error getting progress from Schedd {name}.")
  
              checkpoint_queue.put(None)
-+            logging.debug("Joining the checkpoint queue.")
-             ckpt_updater.join()
+-            ckpt_updater.join()
++            logging.warning("Joining the checkpoint queue.")
++            ckpt_updater.join(timeout=(len(schedd_ads) * args.schedd_history_timeout * len(schedd_ads)))
++            logging.warning("Shutting down the checkpoint queue.")
++            ckpt_updater.terminate()
++            manager.shutdown()
++            logging.warning("Shutting down the multiprocessing pool.")
  
          logging.warning(f"Processing time for schedd history: {(time.time()-schedd_starttime)/60:.2f} mins")
-@@ -188,10 +191,28 @@ def schedd_history_processor(src, schedd_ad, ckpt_queue, iface, metadata, args,
+ 
+@@ -188,10 +198,28 @@ def schedd_history_processor(src, schedd_ad, ckpt_queue, iface, metadata, args,
      metadata["condor_history_host_platform"] = schedd_ad.get("CondorPlatform", "UNKNOWN")
      metadata["condor_history_host_machine"] = schedd_ad.get("Machine", "UNKNOWN")
      metadata["condor_history_host_name"] = schedd_ad.get("Name", "UNKNOWN")
@@ -266,7 +313,7 @@ index 68c828d4fe..bea4ac2876 100644
  
          if isinstance(value, classad.Value):
 diff --git a/src/condor_scripts/adstash/interfaces/elasticsearch.py b/src/condor_scripts/adstash/interfaces/elasticsearch.py
-index 9616dfd5ac..1b93bef905 100644
+index 9616dfd5ac..915ae89bf0 100644
 --- a/src/condor_scripts/adstash/interfaces/elasticsearch.py
 +++ b/src/condor_scripts/adstash/interfaces/elasticsearch.py
 @@ -93,7 +93,7 @@ class ElasticsearchInterface(GenericInterface):
@@ -278,26 +325,15 @@ index 9616dfd5ac..1b93bef905 100644
  
          self.handle = elasticsearch.Elasticsearch(**client_options)
          return self.handle
-@@ -236,15 +236,15 @@ class ElasticsearchInterface(GenericInterface):
-         existing_mappings = self.get_mappings(index)
-         for outer_key in mappings:
-             if outer_key not in existing_mappings:  # add anything missing
--                updated_mappings[key] = mappings[key]
--                updated_mappings = True
-+                updated_mappings[outer_key] = mappings[outer_key]
-+                update_mappings = True
-             elif isinstance(mappings[outer_key], dict):  # update missing keys in any existing dicts
-                 missing_inner_keys = set(mappings[outer_key]) - set(existing_mappings[outer_key])
-                 if len(missing_inner_keys) > 0:
--                    update_mappings = True
-                     updated_mappings[outer_key] = {}
-                     for inner_key in missing_inner_keys:
--                        updated_mappings[inner_key] = mappings[outer_key][inner_key]
-+                        updated_mappings[outer_key][inner_key] = mappings[outer_key][inner_key]
-+                    update_mappings = True
-         if update_mappings:
-             logging.info(f"Updated mappings for index {index}")
-             logging.debug(f"{pprint.pformat(update_mappings)}")
+@@ -255,6 +255,8 @@ class ElasticsearchInterface(GenericInterface):
+                 mappings_file = log_dir / "condor_adstash_elasticsearch_last_mappings.json"
+                 logging.debug(f"Writing updated mappings to {mappings_file}.")
+                 json.dump(updated_mappings, open(mappings_file, "w"), indent=2)
++                old_mappings_file = log_dir / "condor_adstash_elasticsearch_previous_mappings.json"
++                json.dump(existing_mappings, open(old_mappings_file, "w"), indent=2)
+             
+ 
+ 
 diff --git a/src/condor_scripts/adstash/interfaces/opensearch.py b/src/condor_scripts/adstash/interfaces/opensearch.py
 index 662ddb94fa..e3ff361d97 100644
 --- a/src/condor_scripts/adstash/interfaces/opensearch.py

@@ -1,6 +1,7 @@
-FROM python:3.10-slim-bullseye
+FROM python:3.11-slim-bullseye
 ARG HTCONDOR_RELEASE=10.x
-ARG HTCONDOR_VERSION=10.2.3
+ARG HTCONDOR_VERSION=10.7.0
+ARG ELASTICSEARCH_VERSION=8.9.0
 
 # set up adstash user
 ENV ADSTASH_USER=adstash
@@ -9,11 +10,13 @@ ENV ADSTASH_CONFIG=${ADSTASH_HOME}/adstash_config
 ENV ADSTASH_PATH=/opt/condor_adstash
 ENV ADSTASH_BIN=${ADSTASH_PATH}/bin
 ENV ADSTASH_LIB=${ADSTASH_PATH}/lib
+ENV ADSTASH_ARGS=
 RUN useradd -md ${ADSTASH_HOME} ${ADSTASH_USER}
 
 # install external Python libraries
 ADD requirements.txt /tmp/requirements.txt
 RUN sed -i s/HTCONDOR_VERSION/${HTCONDOR_VERSION}/ /tmp/requirements.txt
+RUN sed -i s/ELASTICSEARCH_VERSION/${ELASTICSEARCH_VERSION}/ /tmp/requirements.txt
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt
@@ -39,7 +42,8 @@ RUN mkdir -p ${TMPDIR} ${ADSTASH_PATH}/bin ${ADSTASH_PATH}/lib && \
 
 # set up supervisord
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-CMD ["/usr/bin/supervisord"]
+COPY exit_supervisord.sh /exit_supervisord.sh
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 
 # set up condor config
 COPY adstash_config ${ADSTASH_CONFIG}
