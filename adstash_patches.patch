@@ -331,9 +331,9 @@ index 9616dfd5ac..915ae89bf0 100644
                  json.dump(updated_mappings, open(mappings_file, "w"), indent=2)
 +                old_mappings_file = log_dir / "condor_adstash_elasticsearch_previous_mappings.json"
 +                json.dump(existing_mappings, open(old_mappings_file, "w"), indent=2)
-             
  
  
+     def make_bulk_body(self, ads, metadata={}):
 diff --git a/src/condor_scripts/adstash/interfaces/opensearch.py b/src/condor_scripts/adstash/interfaces/opensearch.py
 index 662ddb94fa..e3ff361d97 100644
 --- a/src/condor_scripts/adstash/interfaces/opensearch.py
