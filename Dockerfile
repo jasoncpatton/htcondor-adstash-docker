@@ -1,7 +1,7 @@
 FROM python:3.11-slim-bullseye
 ARG HTCONDOR_RELEASE=10.x
-ARG HTCONDOR_VERSION=10.7.0
-ARG ELASTICSEARCH_VERSION=8.9.0
+ARG HTCONDOR_VERSION=10.9.0
+ARG ELASTICSEARCHPY_VERSION=8.10.0
 
 # set up adstash user
 ENV ADSTASH_USER=adstash
@@ -13,19 +13,19 @@ ENV ADSTASH_LIB=${ADSTASH_PATH}/lib
 ENV ADSTASH_ARGS=
 RUN useradd -md ${ADSTASH_HOME} ${ADSTASH_USER}
 
-# install external Python libraries
-ADD requirements.txt /tmp/requirements.txt
-RUN sed -i s/HTCONDOR_VERSION/${HTCONDOR_VERSION}/ /tmp/requirements.txt
-RUN sed -i s/ELASTICSEARCH_VERSION/${ELASTICSEARCH_VERSION}/ /tmp/requirements.txt
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r /tmp/requirements.txt && \
-    rm /tmp/requirements.txt
-
-# install packages
+# install system packages
 RUN apt-get update && \
     apt-get install -y git curl supervisor && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# install external Python libraries
+ADD requirements.txt /tmp/requirements.txt
+RUN sed -i s/HTCONDOR_VERSION/${HTCONDOR_VERSION}/ /tmp/requirements.txt
+RUN sed -i s/ELASTICSEARCHPY_VERSION/${ELASTICSEARCHPY_VERSION}/ /tmp/requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
 
 # install condor_adstash
 ARG HTCONDOR_TARBALL=https://research.cs.wisc.edu/htcondor/tarball/${HTCONDOR_RELEASE}/${HTCONDOR_VERSION}/release/condor-${HTCONDOR_VERSION}-src.tar.gz
