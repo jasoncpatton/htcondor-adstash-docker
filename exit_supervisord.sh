@@ -6,8 +6,12 @@
 # Signal readiness to start
 echo "READY"
 
+# Set a default 20 minute timeout
+ADSTASH_TIMEOUT="${ADSTASH_TIMEOUT:-1200}"
+ADSTASH_TIMED_OUT=true
+
 # Read lines from stdin
-while read line; do
+while read -t $ADSTASH_TIMEOUT line; do
 
     # Each line containers a header with the length of data to read
     echo "Processing header: $line" >&2
@@ -22,6 +26,7 @@ while read line; do
     # Tell supervisord to exit if a certain process exited expectedly
     if [ "$process" = "adstash" ] && [ "$expected" -eq "1" ]; then
         echo "Adstash exited normally, stopping supervisord..." >&2
+        ADSTASH_TIMED_OUT=false
         kill -SIGQUIT $(cat "/var/run/supervisord.pid")
     fi
 
@@ -31,3 +36,9 @@ while read line; do
     echo "READY"
 
 done < /dev/stdin
+
+# Tell supervisord to exit if we timed out
+if $ADSTASH_TIMED_OUT; then
+    echo "Adstash failed to exit in $ADSTASH_TIMEOUT seconds, stopping supervisord..." >&2
+    kill -SIGQUIT $(cat "/var/run/supervisord.pid")
+fi
