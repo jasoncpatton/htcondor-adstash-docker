@@ -1,7 +1,8 @@
 FROM python:3.12-slim-bookworm
 ARG HTCONDOR_RELEASE=23.x
-ARG HTCONDOR_VERSION=23.4.0
-ARG ELASTICSEARCHPY_VERSION=8.10.0
+ARG HTCONDOR_VERSION=23.10.0
+ARG ELASTICSEARCHPY_VERSION=8.15.1
+ARG UPDATE_OR_RELEASE=update
 
 # set up adstash user
 ENV ADSTASH_USER=adstash
@@ -10,6 +11,7 @@ ENV ADSTASH_CONFIG=${ADSTASH_HOME}/adstash_config
 ENV ADSTASH_PATH=/opt/condor_adstash
 ENV ADSTASH_BIN=${ADSTASH_PATH}/bin
 ENV ADSTASH_LIB=${ADSTASH_PATH}/lib
+ENV ADSTASH_TIMEOUT=1200
 ENV ADSTASH_ARGS=
 RUN useradd -md ${ADSTASH_HOME} ${ADSTASH_USER}
 
@@ -21,20 +23,24 @@ RUN apt-get update && \
 
 # install external Python libraries
 ADD requirements.txt /tmp/requirements.txt
-RUN sed -i s/HTCONDOR_VERSION/${HTCONDOR_VERSION}/ /tmp/requirements.txt
+RUN if [ "${UPDATE_OR_RELEASE}" = "release" ]; then \
+        sed -i s/HTCONDOR_VERSION/${HTCONDOR_VERSION}/ /tmp/requirements.txt; \
+    else \
+        sed -i s/'==HTCONDOR_VERSION'// /tmp/requirements.txt; \
+    fi
 RUN sed -i s/ELASTICSEARCHPY_VERSION/${ELASTICSEARCHPY_VERSION}/ /tmp/requirements.txt
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt
 
 # install condor_adstash
-ARG HTCONDOR_TARBALL=https://research.cs.wisc.edu/htcondor/tarball/${HTCONDOR_RELEASE}/${HTCONDOR_VERSION}/release/condor-${HTCONDOR_VERSION}-src.tar.gz
+ARG HTCONDOR_TARBALL=https://research.cs.wisc.edu/htcondor/tarball/${HTCONDOR_RELEASE}/${HTCONDOR_VERSION}/${UPDATE_OR_RELEASE}/condor-${HTCONDOR_VERSION}-src.tar.gz
 ARG TMPDIR=/tmp/setup
 COPY adstash_patches.patch $TMPDIR/adstash_patches.patch
 RUN mkdir -p ${TMPDIR} ${ADSTASH_PATH}/bin ${ADSTASH_PATH}/lib && \
     curl -k -L ${HTCONDOR_TARBALL} > ${TMPDIR}/htcondor.tar.gz && \
     tar -xf ${TMPDIR}/htcondor.tar.gz --strip-components=1 --directory=${TMPDIR} && \
-    git apply --directory ${TMPDIR} --unsafe-paths ${TMPDIR}/adstash_patches.patch && \
+    git apply --allow-empty --directory ${TMPDIR} --unsafe-paths ${TMPDIR}/adstash_patches.patch && \
     mv ${TMPDIR}/src/condor_scripts/condor_adstash ${ADSTASH_BIN} && \
     mv ${TMPDIR}/src/condor_scripts/adstash ${ADSTASH_LIB} && \
     rm -rf ${TMPDIR} && \
