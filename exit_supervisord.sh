@@ -8,7 +8,6 @@ echo "READY"
 
 # Set a default 20 minute timeout
 ADSTASH_TIMEOUT="${ADSTASH_TIMEOUT:-1200}"
-ADSTASH_TIMED_OUT=true
 
 # Read lines from stdin
 while read -t $ADSTASH_TIMEOUT line; do
@@ -21,13 +20,12 @@ while read -t $ADSTASH_TIMEOUT line; do
     read -n $bytes result
     echo "Got result: $result" >&2
     process=$(echo $result | grep -oP '(?<=processname:)\w+')
-    expected=$(echo $result | grep -oP '(?<=expected:)\w+')
 
-    # Tell supervisord to exit if a certain process exited expectedly
-    if [ "$process" = "adstash" ] && [ "$expected" -eq "1" ]; then
-        echo "Adstash exited normally, stopping supervisord..." >&2
-        ADSTASH_TIMED_OUT=false
+    # Tell supervisord to exit if adstash exited
+    if [ "$process" = "adstash" ]; then
+        echo "Adstash exited." >&2
         kill -SIGQUIT $(cat "/var/run/supervisord.pid")
+        exit 0
     fi
 
     # Signal readiness again
@@ -38,7 +36,5 @@ while read -t $ADSTASH_TIMEOUT line; do
 done < /dev/stdin
 
 # Tell supervisord to exit if we timed out
-if $ADSTASH_TIMED_OUT; then
-    echo "Adstash failed to exit in $ADSTASH_TIMEOUT seconds, stopping supervisord..." >&2
-    kill -SIGQUIT $(cat "/var/run/supervisord.pid")
-fi
+echo "Adstash failed to exit in $ADSTASH_TIMEOUT seconds, stopping supervisord..." >&2
+kill -SIGQUIT $(cat "/var/run/supervisord.pid")
