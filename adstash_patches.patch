@@ -1,3 +1,101 @@
+diff --git a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
+index b0094d7d9e..dd37bb3429 100644
+--- a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
++++ b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
+@@ -39,8 +39,10 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+         self.indexed_keyword_attrs = {
+             "Endpoint",
+             "ErrorType",
++            "ErrorMessage",
+             "FailedName",
+             "FailureType",
++            "DebugErrorType",
+             "GLIDEIN_ResourceName",
+             "GLIDEIN_Site",
+             "GlobalJobId",
+@@ -75,6 +77,7 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+             "ErrorCode",
+             "LibcurlReturnCode",
+             "NumShadowStarts",
++            "PelicanErrorCode",
+             "ProcId",
+             "TransferFileBytes",
+             "TransferHttpStatusCode",
+@@ -90,6 +93,7 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+         }
+         self.bool_attrs = {
+             "FinalAttempt",
++            "Retryable",
+             "TransferSuccess",
+         }
+         self.nested_attrs = set()
+@@ -189,11 +193,14 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+ 
+     def expand_plugin_result_ads(self, ads, my_attr_name=None):
+         debug_results = []
++        error_results = iter(())
+         result = {}
+         for ad in ads:
+             for attr, value in ad.items():
+                 if attr.lower() == "developerdata":
+                     debug_results = self.expand_debug_ad(value)
++                elif attr.lower() == "transfererrordata":
++                    error_results = self.expand_error_ads(value)
+                 else:
+                     attr, value = self.normalize(attr, value)
+                     result[attr] = value
+@@ -205,18 +212,26 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+                 result["Attempts"] = 1
+                 result["Attempt"] = 0
+                 result["FinalAttempt"] = True
++                try:  # add error data if it exists
++                    result.update(next(error_results))
++                except StopIteration:
++                    pass
+                 yield result
+             else:
+                 for debug_result in debug_results:
++                    try:
++                        error_result = next(error_results)
++                    except StopIteration:
++                        error_result = {}
+                     if debug_result.get("FinalAttempt"):  # merge and return entire ad on final attempt
+                         try:
+-                            yield debug_result | result
++                            yield debug_result | result | error_result
+                         except TypeError:  # backwards compat
+                             yield {**debug_result, **result}
+                     else:  # otherwise only add identifying attrs
+                         for attr in ("TransferProtocol", "TransferType", "TransferUrl"):
+                             debug_result[attr] = result.get(attr)
+-                        yield debug_result
++                        yield debug_result | error_result
+ 
+ 
+     def expand_debug_ad(self, ad):
+@@ -276,6 +291,22 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+                 yield {**result, **attempt_result}
+ 
+ 
++    def expand_error_ads(self, ads):
++        for ad in ads:
++            error_result = {}
++            for attr, value in ad.items():
++                if attr.lower() == "developerdata":
++                    for debug_attr, debug_value in value.items():
++                        if debug_attr in ad:
++                            debug_attr = f"Debug{debug_attr}"
++                        debug_attr, debug_value = self.normalize(debug_attr, debug_value)
++                        error_result[debug_attr] = debug_value
++                else:
++                    attr, value = self.normalize(attr, value)
++                    error_result[attr] = value
++            yield error_result
++
++
+     def to_json_list(self, ad, return_dict=False):
+         result = {}
+ 
 diff --git a/src/condor_scripts/adstash/convert.py b/src/condor_scripts/adstash/convert.py
 index b1922a08ea..31f4fe4b9d 100644
 --- a/src/condor_scripts/adstash/convert.py
@@ -39,7 +137,7 @@ index b1922a08ea..31f4fe4b9d 100644
      "MaxJobRetirementTime",
      "MaxTransferInputMB",
 diff --git a/src/condor_scripts/adstash/interfaces/elasticsearch.py b/src/condor_scripts/adstash/interfaces/elasticsearch.py
-index 0591222e0b..893ee0af84 100644
+index 988dc0c64f..5ea68caa3c 100644
 --- a/src/condor_scripts/adstash/interfaces/elasticsearch.py
 +++ b/src/condor_scripts/adstash/interfaces/elasticsearch.py
 @@ -134,7 +134,7 @@ class ElasticsearchInterface(GenericInterface):
