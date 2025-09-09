@@ -1,7 +1,7 @@
 FROM python:3.12-slim-bookworm
 ARG HTCONDOR_RELEASE=24.x
-ARG HTCONDOR_RELEASE_TYPE=beta
-ARG HTCONDOR_VERSION=24.9.0
+ARG HTCONDOR_RELEASE_TYPE=release
+ARG HTCONDOR_VERSION=24.9.2
 ARG ELASTICSEARCHPY_VERSION=8.14.0
 
 # set up adstash user
@@ -23,8 +23,7 @@ RUN apt-get update && \
 
 # install external Python libraries
 ADD requirements.txt /tmp/requirements.txt
-ARG HTCONDOR_TMP_VERSION=24.7.3
-RUN sed -i s/HTCONDOR_VERSION/${HTCONDOR_TMP_VERSION}/ /tmp/requirements.txt
+RUN sed -i s/HTCONDOR_VERSION/${HTCONDOR_VERSION}/ /tmp/requirements.txt
 RUN sed -i s/ELASTICSEARCHPY_VERSION/${ELASTICSEARCHPY_VERSION}/ /tmp/requirements.txt
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r /tmp/requirements.txt && \
