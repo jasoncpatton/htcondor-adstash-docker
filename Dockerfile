@@ -1,7 +1,8 @@
 FROM python:3.12-slim-bookworm
-ARG HTCONDOR_RELEASE=23.x
-ARG HTCONDOR_VERSION=23.4.0
-ARG ELASTICSEARCHPY_VERSION=8.10.0
+ARG HTCONDOR_RELEASE=24.x
+ARG HTCONDOR_RELEASE_TYPE=release
+ARG HTCONDOR_VERSION=24.9.2
+ARG ELASTICSEARCHPY_VERSION=8.14.0
 
 # set up adstash user
 ENV ADSTASH_USER=adstash
@@ -10,6 +11,7 @@ ENV ADSTASH_CONFIG=${ADSTASH_HOME}/adstash_config
 ENV ADSTASH_PATH=/opt/condor_adstash
 ENV ADSTASH_BIN=${ADSTASH_PATH}/bin
 ENV ADSTASH_LIB=${ADSTASH_PATH}/lib
+ENV ADSTASH_TIMEOUT=1200
 ENV ADSTASH_ARGS=
 RUN useradd -md ${ADSTASH_HOME} ${ADSTASH_USER}
 
@@ -26,9 +28,10 @@ RUN sed -i s/ELASTICSEARCHPY_VERSION/${ELASTICSEARCHPY_VERSION}/ /tmp/requiremen
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt
+ENV CONDOR_PYTHON_LIB=
 
 # install condor_adstash
-ARG HTCONDOR_TARBALL=https://research.cs.wisc.edu/htcondor/tarball/${HTCONDOR_RELEASE}/${HTCONDOR_VERSION}/release/condor-${HTCONDOR_VERSION}-src.tar.gz
+ARG HTCONDOR_TARBALL=https://research.cs.wisc.edu/htcondor/tarball/${HTCONDOR_RELEASE}/${HTCONDOR_VERSION}/${HTCONDOR_RELEASE_TYPE}/condor-${HTCONDOR_VERSION}-src.tar.gz
 ARG TMPDIR=/tmp/setup
 COPY adstash_patches.patch $TMPDIR/adstash_patches.patch
 RUN mkdir -p ${TMPDIR} ${ADSTASH_PATH}/bin ${ADSTASH_PATH}/lib && \
@@ -50,4 +53,4 @@ COPY adstash_config ${ADSTASH_CONFIG}
 RUN chown ${ADSTASH_USER}:${ADSTASH_USER} ${ADSTASH_CONFIG}
 
 # test imports
-RUN PYTHONPATH=$PYTHONPATH:${ADSTASH_LIB} python -c "import htcondor; import elasticsearch; import adstash"
+RUN PYTHONPATH=$PYTHONPATH:${ADSTASH_LIB}:${CONDOR_PYTHON_LIB} python -c "import htcondor; import elasticsearch; import adstash"
