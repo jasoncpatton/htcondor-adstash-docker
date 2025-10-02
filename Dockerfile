@@ -1,7 +1,7 @@
 FROM python:3.12-slim-bookworm
-ARG HTCONDOR_RELEASE=24.x
+ARG HTCONDOR_RELEASE=25.x
 ARG HTCONDOR_RELEASE_TYPE=release
-ARG HTCONDOR_VERSION=24.9.2
+ARG HTCONDOR_VERSION=25.1.0
 ARG ELASTICSEARCHPY_VERSION=8.14.0
 
 # set up adstash user
@@ -53,4 +53,4 @@ COPY adstash_config ${ADSTASH_CONFIG}
 RUN chown ${ADSTASH_USER}:${ADSTASH_USER} ${ADSTASH_CONFIG}
 
 # test imports
-RUN PYTHONPATH=$PYTHONPATH:${ADSTASH_LIB}:${CONDOR_PYTHON_LIB} python -c "import htcondor; import elasticsearch; import adstash"
+RUN PYTHONPATH=$PYTHONPATH:${ADSTASH_LIB}:${CONDOR_PYTHON_LIB} python -c "import htcondor2 as htcondor; import elasticsearch; import adstash"
