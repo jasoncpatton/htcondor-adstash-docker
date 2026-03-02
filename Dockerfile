@@ -1,8 +1,8 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.13-slim-trixie
 ARG HTCONDOR_RELEASE=25.x
 ARG HTCONDOR_RELEASE_TYPE=release
-ARG HTCONDOR_VERSION=25.1.0
-ARG ELASTICSEARCHPY_VERSION=8.14.0
+ARG HTCONDOR_VERSION=25.6.1
+ARG ELASTICSEARCHPY_VERSION=8.19.3
 
 # set up adstash user
 ENV ADSTASH_USER=adstash
@@ -33,11 +33,11 @@ ENV CONDOR_PYTHON_LIB=
 # install condor_adstash
 ARG HTCONDOR_TARBALL=https://research.cs.wisc.edu/htcondor/tarball/${HTCONDOR_RELEASE}/${HTCONDOR_VERSION}/${HTCONDOR_RELEASE_TYPE}/condor-${HTCONDOR_VERSION}-src.tar.gz
 ARG TMPDIR=/tmp/setup
-COPY adstash_patches.patch $TMPDIR/adstash_patches.patch
+COPY v25-preview.patch $TMPDIR/v25-preview.patch
 RUN mkdir -p ${TMPDIR} ${ADSTASH_PATH}/bin ${ADSTASH_PATH}/lib && \
     curl -k -L ${HTCONDOR_TARBALL} > ${TMPDIR}/htcondor.tar.gz && \
     tar -xf ${TMPDIR}/htcondor.tar.gz --strip-components=1 --directory=${TMPDIR} && \
-    git apply --directory ${TMPDIR} --unsafe-paths ${TMPDIR}/adstash_patches.patch && \
+    git apply --directory ${TMPDIR} --unsafe-paths ${TMPDIR}/v25-preview.patch && \
     mv ${TMPDIR}/src/condor_scripts/condor_adstash ${ADSTASH_BIN} && \
     mv ${TMPDIR}/src/condor_scripts/adstash ${ADSTASH_LIB} && \
     rm -rf ${TMPDIR} && \
