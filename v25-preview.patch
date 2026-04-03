@@ -3154,10 +3154,10 @@ index 0000000000..a51193ffb3
 +}
 diff --git a/src/condor_scripts/adstash/mapping/functions.py b/src/condor_scripts/adstash/mapping/functions.py
 new file mode 100644
-index 0000000000..4f848ba2a5
+index 0000000000..2fded9533e
 --- /dev/null
 +++ b/src/condor_scripts/adstash/mapping/functions.py
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,174 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -3174,8 +3174,6 @@ index 0000000000..4f848ba2a5
 +# limitations under the License.
 +
 +import logging
-+
-+from collections import OrderedDict
 +
 +
 +def get_ignore_attrs(custom_mappings={}, custom_ignore_attrs=set(), default_ignore_attrs=set()) -> set:
@@ -3338,7 +3336,7 @@ diff --git a/src/condor_scripts/adstash/convert.py b/src/condor_scripts/adstash/
 similarity index 52%
 rename from src/condor_scripts/adstash/convert.py
 rename to src/condor_scripts/adstash/mapping/job.py
-index b1922a08ea..9d1111de20 100644
+index b1922a08ea..9566b58332 100644
 --- a/src/condor_scripts/adstash/convert.py
 +++ b/src/condor_scripts/adstash/mapping/job.py
 @@ -1,4 +1,4 @@
@@ -3347,7 +3345,7 @@ index b1922a08ea..9d1111de20 100644
  # University of Wisconsin-Madison, WI.
  #
  # Licensed under the Apache License, Version 2.0 (the "License");
-@@ -13,160 +13,161 @@
+@@ -13,160 +13,159 @@
  # See the License for the specific language governing permissions and
  # limitations under the License.
  
@@ -3356,11 +3354,13 @@ index b1922a08ea..9d1111de20 100644
 -import time
 -import logging
 -from functools import lru_cache
-+from collections import OrderedDict
- 
--import classad2 as classad
 +from adstash.mapping.common import MAX_KEYWORD_LEN, METADATA_MAPPING, OTHER_MAPPING_SETTINGS
  
+-import classad2 as classad
+ 
++# INDEXED_TEXT_ATTRS should only contain string attrs that
++# require full text search.
++INDEXED_TEXT_ATTRS = set()
  
 -# Attributes to be used in all projections to condor_history
 -REQUIRED_ATTRS = {
@@ -3375,14 +3375,6 @@ index b1922a08ea..9d1111de20 100644
 -    "MyType",
 -    "ProcId",
 -    "RemoteHost",
--}
-+# INDEXED_TEXT_ATTRS should only contain string attrs that
-+# require full text search.
-+INDEXED_TEXT_ATTRS = set()
- 
--# TEXT_ATTRS should only contain attrs that we want full text search on,
--# otherwise strings are stored as keywords.
--TEXT_ATTRS = {} or set()
 +# NON_INDEXED_TEXT_ATTRS should contain string attrs that
 +# are highly variable and not likely to be searched on.
 +# These could always be "upgraded" to indexed text/keywords
@@ -3403,8 +3395,12 @@ index b1922a08ea..9d1111de20 100644
 +    "SubmitEventUserNotes",
 +    "UserLogExecuteEventAttrs",
 +    "VMPARAM_vm_Disk",
-+}
+ }
  
+-# TEXT_ATTRS should only contain attrs that we want full text search on,
+-# otherwise strings are stored as keywords.
+-TEXT_ATTRS = {} or set()
+-
 +# INDEXED_KEYWORD_ATTRS should contain string attrs
 +# with relatively few unique values.
  INDEXED_KEYWORD_ATTRS = {
@@ -3607,7 +3603,7 @@ index b1922a08ea..9d1111de20 100644
      "TransferCheckpoint",
      "TransferInput",
      "TransferInputRemaps",
-@@ -174,37 +175,58 @@ NOINDEX_KEYWORD_ATTRS = {
+@@ -174,37 +173,58 @@ NOINDEX_KEYWORD_ATTRS = {
      "TransferOutput",
      "TransferOutputRemaps",
      "TransferPlugins",
@@ -3666,7 +3662,7 @@ index b1922a08ea..9d1111de20 100644
      "CpusProvisioned",
      "CumulativeRemoteSysCpu",
      "CumulativeRemoteUserCpu",
-@@ -212,9 +234,32 @@ INT_ATTRS = {
+@@ -212,9 +232,32 @@ INT_ATTRS = {
      "CumulativeSuspensionTime",
      "CumulativeTransferTime",
      "CurrentHosts",
@@ -3700,7 +3696,7 @@ index b1922a08ea..9d1111de20 100644
      "DiskProvisioned",
      "DiskUsage_RAW",
      "DiskUsage",
-@@ -224,40 +269,51 @@ INT_ATTRS = {
+@@ -224,40 +267,51 @@ INT_ATTRS = {
      "ExitCode",
      "ExitSignal",
      "ExitStatus",
@@ -3759,7 +3755,7 @@ index b1922a08ea..9d1111de20 100644
      "MaxTransferInputMB",
      "MaxTransferOutputMB",
      "MaxWallTimeMins_RAW",
-@@ -270,18 +326,25 @@ INT_ATTRS = {
+@@ -270,18 +324,25 @@ INT_ATTRS = {
      "NoopJobExitSignal",
      "NumCkpts_RAW",
      "NumCkpts",
@@ -3785,7 +3781,7 @@ index b1922a08ea..9d1111de20 100644
      "PeriodicHoldSubCode",
      "PilotRestLifeTimeMins",
      "PostCmdExitCode",
-@@ -293,12 +356,18 @@ INT_ATTRS = {
+@@ -293,12 +354,18 @@ INT_ATTRS = {
      "PreJobPrio1",
      "PreJobPrio2",
      "ProcId",
@@ -3804,7 +3800,7 @@ index b1922a08ea..9d1111de20 100644
      "RemoteSlotID",
      "RemoteSysCpu",
      "RemoteUserCpu",
-@@ -312,6 +381,7 @@ INT_ATTRS = {
+@@ -312,6 +379,7 @@ INT_ATTRS = {
      "ResidentSetSize",
      "ScratchDirFileCount",
      "StackSize",
@@ -3812,7 +3808,7 @@ index b1922a08ea..9d1111de20 100644
      "StatsLifetimeStarter",
      "SuccessCheckpointExitCode",
      "SuccessCheckpointExitSignal",
-@@ -319,20 +389,28 @@ INT_ATTRS = {
+@@ -319,20 +387,28 @@ INT_ATTRS = {
      "SuccessPostExitSignal",
      "SuccessPreExitCode",
      "SuccessPreExitSignal",
@@ -3843,7 +3839,7 @@ index b1922a08ea..9d1111de20 100644
      "JobCurrentFinishTransferInputDate",
      "JobCurrentFinishTransferOutputDate",
      "JobCurrentStartDate",
-@@ -341,8 +419,10 @@ DATE_ATTRS = {
+@@ -341,8 +417,10 @@ DATE_ATTRS = {
      "JobCurrentStartTransferOutputDate",
      "JobDisconnectedDate",
      "JobFinishedHookDone",
@@ -3854,7 +3850,7 @@ index b1922a08ea..9d1111de20 100644
      "JobQueueBirthdate",
      "JobStartDate",
      "LastJobLeaseRenewal",
-@@ -352,15 +432,19 @@ DATE_ATTRS = {
+@@ -352,15 +430,19 @@ DATE_ATTRS = {
      "LastSuspensionTime",
      "LastVacateTime_RAW",
      "LastVacateTime",
@@ -3876,7 +3872,7 @@ index b1922a08ea..9d1111de20 100644
      "TransferInFinished",
      "TransferInQueued",
      "TransferInStarted",
-@@ -372,14 +456,22 @@ DATE_ATTRS = {
+@@ -372,14 +454,22 @@ DATE_ATTRS = {
  BOOL_ATTRS = {
      "BufferFiles",
      "CurrentStatusUnknown",
@@ -3899,7 +3895,7 @@ index b1922a08ea..9d1111de20 100644
      "LeaveJobInQueue",
      "LoadProfile",
      "ManifestDesired",
-@@ -387,13 +479,17 @@ BOOL_ATTRS = {
+@@ -387,13 +477,17 @@ BOOL_ATTRS = {
      "Nonessential",
      "OnExitHold",
      "OnExitRemove",
@@ -3917,7 +3913,7 @@ index b1922a08ea..9d1111de20 100644
      "RunAsOwner",
      "SendCredential",
      "SkipIfDataflow",
-@@ -405,6 +501,7 @@ BOOL_ATTRS = {
+@@ -405,6 +499,7 @@ BOOL_ATTRS = {
      "SuccessPostExitBySignal",
      "SuccessPreExitBySignal",
      "TerminationPending",
@@ -3925,7 +3921,7 @@ index b1922a08ea..9d1111de20 100644
      "TransferErr",
      "TransferExecutable",
      "TransferIn",
-@@ -414,16 +511,21 @@ BOOL_ATTRS = {
+@@ -414,16 +509,21 @@ BOOL_ATTRS = {
      "TransferringOutput",
      "Use_x509UserProxy",
      "UserLogUseXML",
@@ -3947,7 +3943,7 @@ index b1922a08ea..9d1111de20 100644
      "WantMatchDiagnostics",
      "WantMatching",
      "WantParallelScheduling",
-@@ -433,22 +535,47 @@ BOOL_ATTRS = {
+@@ -433,22 +533,47 @@ BOOL_ATTRS = {
      "WantRemoteSyscalls",
      "WantRemoteUpdates",
      "WantResAd",
@@ -3996,7 +3992,7 @@ index b1922a08ea..9d1111de20 100644
      "EC2AccessKeyId",
      "EC2KeyPair",
      "EC2KeyPairFile",
-@@ -473,6 +600,8 @@ IGNORE_ATTRS = {
+@@ -473,6 +598,8 @@ IGNORE_ATTRS = {
      "KeystoreFile",
      "KeystorePassphraseFile",
      "LastPublicClaimId",
@@ -4005,7 +4001,7 @@ index b1922a08ea..9d1111de20 100644
      "PostArgs",
      "PostArguments",
      "PostEnv",
-@@ -482,244 +611,67 @@ IGNORE_ATTRS = {
+@@ -482,244 +609,67 @@ IGNORE_ATTRS = {
      "PreEnv",
      "PreEnvironment",
      "PublicClaimId",
@@ -4312,10 +4308,10 @@ index b1922a08ea..9d1111de20 100644
 +]
 diff --git a/src/condor_scripts/adstash/mapping/job_epoch.py b/src/condor_scripts/adstash/mapping/job_epoch.py
 new file mode 100644
-index 0000000000..f4182f60a3
+index 0000000000..c046f5c75e
 --- /dev/null
 +++ b/src/condor_scripts/adstash/mapping/job_epoch.py
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,52 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -4330,6 +4326,8 @@ index 0000000000..f4182f60a3
 +# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
++
++from adstash.mapping.common import MAX_KEYWORD_LEN
 +
 +from adstash.mapping.job import (
 +    INDEXED_KEYWORD_ATTRS,
@@ -4368,10 +4366,10 @@ index 0000000000..f4182f60a3
 +DATE_ATTRS.add("EpochWriteDate")
 diff --git a/src/condor_scripts/adstash/mapping/transfer_epoch.py b/src/condor_scripts/adstash/mapping/transfer_epoch.py
 new file mode 100644
-index 0000000000..86e3306995
+index 0000000000..d5ddb1c944
 --- /dev/null
 +++ b/src/condor_scripts/adstash/mapping/transfer_epoch.py
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,129 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -4386,8 +4384,6 @@ index 0000000000..86e3306995
 +# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
-+
-+from collections import OrderedDict
 +
 +from adstash.mapping.common import MAX_KEYWORD_LEN, METADATA_MAPPING, OTHER_MAPPING_SETTINGS
 +
@@ -4479,29 +4475,30 @@ index 0000000000..86e3306995
 +    "OutputPluginInvocations",
 +}
 +
-+DYNAMIC_TEMPLATES = OrderedDict()
-+DYNAMIC_TEMPLATES["raw_expression"] = {  # Attrs ending in "_EXPR" are generated during
-+    "match": r"*_EXPR",  # ad conversion for expressions that cannot be evaluated
-+    "mapping": {"type": "text", "norms": "false", "index": "false"},
-+}
-+DYNAMIC_TEMPLATES["date_attrs"] = {  # Attrs ending in "Date" are usually timestamps
-+    "match": r"*Date",
-+    "mapping": {"type": "date", "format": "epoch_second"},
-+}
-+DYNAMIC_TEMPLATES["target_bool_attrs"] = {  # Attrs starting with "Want", "Has", or
-+    "match_pattern": "regex",  # "Is" are usually boolean checks
-+    "match": r"^(Want|Has|Is)[A-Z_].*$",
-+    "mapping": {"type": "boolean"},
-+}
-+DYNAMIC_TEMPLATES["plugin_invocations"] = {
-+    "match_pattern": "regex",
-+    "match": r"(In|Out)putPluginInvocations\.*$",
-+    "mapping": {"type": "object", "dynamic": True},
-+}
-+DYNAMIC_TEMPLATES["DEFAULT"] = {  # DEFAULT MAPPING - will be evaluated last
-+    "match_mapping_type": "string",  # Store unknown attrs as indexed keywords
-+    "mapping": {"type": "keyword", "ignore_above": MAX_KEYWORD_LEN},  # https://www.elastic.co/guide/en/elasticsearch/reference/7.17/tune-for-disk-usage.html#default-dynamic-string-mapping
-+}
++DYNAMIC_TEMPLATES = [
++    {"raw_expression": {  # Attrs ending in "_EXPR" are generated during
++        "match": r"*_EXPR",  # ad conversion for expressions that cannot be evaluated
++        "mapping": {"type": "text", "norms": "false", "index": "false"},
++    }},
++    {"date_attrs": {  # Attrs ending in "Date" are usually timestamps
++        "match": r"*Date",
++        "mapping": {"type": "date", "format": "epoch_second"},
++    }},
++    {"target_bool_attrs": {  # Attrs starting with "Want", "Has", or
++        "match_pattern": "regex",  # "Is" are usually boolean checks
++        "match": r"^(Want|Has|Is)[A-Z_].*$",
++        "mapping": {"type": "boolean"},
++    }},
++    {"plugin_invocations": {
++        "match_pattern": "regex",
++        "match": r"(In|Out)putPluginInvocations\.*$",
++        "mapping": {"type": "object", "dynamic": True},
++    }},
++    {"DEFAULT": {  # DEFAULT MAPPING - will be evaluated last
++        "match_mapping_type": "string",  # Store unknown attrs as indexed keywords
++        "mapping": {"type": "keyword", "ignore_above": MAX_KEYWORD_LEN},  # https://www.elastic.co/guide/en/elasticsearch/reference/7.17/tune-for-disk-usage.html#default-dynamic-string-mapping
++    }}
++]
 diff --git a/src/condor_scripts/adstash/settings.py b/src/condor_scripts/adstash/settings.py
 new file mode 100644
 index 0000000000..2e51a5454e
