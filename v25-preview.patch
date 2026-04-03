@@ -935,7 +935,7 @@ index 7e0ca49d74..473b7631dc 100644
              if (chunk_size > 0) and (len(chunk) >= chunk_size):
                  logging.debug(f"Posting {len(chunk)} job epoch ads from {schedd_ad['Name']}.")
 diff --git a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
-index 750aeff303..3a273bade8 100644
+index 750aeff303..e9c463e1f9 100644
 --- a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
 +++ b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
 @@ -14,14 +14,12 @@
@@ -955,7 +955,7 @@ index 750aeff303..3a273bade8 100644
  
  import htcondor2 as htcondor
  import classad2 as classad
-@@ -30,97 +28,7 @@ import classad2 as classad
+@@ -30,97 +28,10 @@ import classad2 as classad
  class ScheddTransferEpochHistorySource(GenericAdSource):
  
  
@@ -1047,14 +1047,15 @@ index 750aeff303..3a273bade8 100644
 -        super().__init__(*args, **kwargs)
 -
 -
--    def fetch_ads(self, schedd_ad, max_ads=10000, projection=set()):
--        if projection:
+     def fetch_ads(self, schedd_ad, max_ads=10000, projection=set()):
++
+         if projection:
 -            logging.warning(f"Custom projections are ignored for transfer history ads")
-+    def fetch_ads(self, schedd_ad, max_ads=10000):
++            logging.warning(f"Custom projections are not supported for transfer epoch history")
  
          history_kwargs = {}
          if max_ads > 0:
-@@ -141,216 +49,14 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+@@ -141,216 +52,14 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
          return schedd.jobEpochHistory(constraint=True, projection=[], ad_type="TRANSFER", **history_kwargs)
  
  
@@ -1273,7 +1274,7 @@ index 750aeff303..3a273bade8 100644
              except Exception as e:
                  message = f"Failure when converting document in {schedd_ad['name']} transfer epoch history: {str(e)}"
                  exc = traceback.format_exc()
-@@ -371,7 +77,7 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+@@ -371,7 +80,7 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
                          schedd_checkpoint[attr] = ad[attr]
              for dict_ad in dict_ads:
                  dict_ad["ScheddName"] = schedd_ad["name"]
