@@ -1,25 +1,12 @@
-diff --git a/src/condor_examples/condor_config.local.adstash b/src/condor_examples/condor_config.local.adstash
-index 33a5f39d85..85bc6ca8ed 100644
---- a/src/condor_examples/condor_config.local.adstash
-+++ b/src/condor_examples/condor_config.local.adstash
-@@ -36,7 +36,7 @@ use feature: adstash
- #ADSTASH_SE_USERNAME = 
- #ADSTASH_SE_PASSWORD_FILE = 
- #ADSTASH_SE_USE_HTTPS = False
--#ADSTASH_SE_INDEX_NAME = htcondor-000001
-+#ADSTASH_SE_INDEX_NAME = htcondor
- 
- ###
- ### Rarely changed macros
 diff --git a/src/condor_scripts/adstash/ad_converters/__init__.py b/src/condor_scripts/adstash/ad_converters/__init__.py
 new file mode 100644
 index 0000000000..e69de29bb2
 diff --git a/src/condor_scripts/adstash/ad_converters/generic.py b/src/condor_scripts/adstash/ad_converters/generic.py
 new file mode 100644
-index 0000000000..d9530c3072
+index 0000000000..3a7b338b9e
 --- /dev/null
 +++ b/src/condor_scripts/adstash/ad_converters/generic.py
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,460 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -119,20 +106,21 @@ index 0000000000..d9530c3072
 +
 +    def __init__(
 +            self,
-+            mapping={},
-+            projection=set(),
-+            ignore_attrs=set(),
-+            required_attrs=set(),
-+            timestamp_fields=["EnteredCurrentStatus"],
-+            doc_id_fields=["RecordTime"],
++            mapping=None,
++            projection=None,
++            ignore_attrs=None,
++            custom_ignore_attrs=None,
++            required_attrs=None,
++            timestamp_fields=None,
++            doc_id_fields=None,
 +            ):
-+        self.mapping = mapping
-+        self.ignore_attrs = get_ignore_attrs(mapping, ignore_attrs)
-+        self.required_attrs = required_attrs
-+        self.timestamp_fields = timestamp_fields
-+        self.doc_id_fields = doc_id_fields
-+        if len(projection) > 0:
-+            self.projection = {attr.lower() for attr in projection | required_attrs}
++        self.mapping = mapping or {}
++        self.ignore_attrs = get_ignore_attrs(self.mapping, custom_ignore_attrs, ignore_attrs)
++        self.required_attrs = required_attrs or set()
++        self.timestamp_fields = timestamp_fields or ["EnteredCurrentStatus"]
++        self.doc_id_fields = doc_id_fields or ["RecordTime"]
++        if projection:
++            self.projection = {attr.lower() for attr in projection | self.required_attrs}
 +        else:
 +            self.projection = None
 +        self.known_field_types = self.get_known_field_types(self.mapping)
@@ -186,14 +174,14 @@ index 0000000000..d9530c3072
 +        '''
 +        known_field_types = defaultdict(dict)
 +        for base_field_name, field_properties in mapping["properties"].items():
-+            field_name_heirarchy = parent_field_names + [base_field_name]
-+            flattened_field_name = ".".join(field_name_heirarchy)
++            field_name_hierarchy = parent_field_names + [base_field_name]
++            flattened_field_name = ".".join(field_name_hierarchy)
 +            if self.projection is not None and flattened_field_name.lower() not in self.projection:
 +                continue
 +            field_type = FIELD_TYPE_MAP[field_properties.get("type", "object")]
 +            known_field_types[flattened_field_name.lower()][flattened_field_name] = field_type
 +            if field_type is dict and "properties" in field_properties:
-+                known_field_types = known_field_types | self.get_known_field_types(field_properties, field_name_heirarchy)
++                known_field_types = known_field_types | self.get_known_field_types(field_properties, field_name_hierarchy)
 +        return known_field_types
 +
 +    def get_dynamic_template_matchers(self, mapping: dict) -> OrderedDict:
@@ -265,7 +253,7 @@ index 0000000000..d9530c3072
 +
 +        # 1. Get the field name and field type mappings if known
 +        known_mappings = True
-+        field_names_types = self.known_field_types[attr.lower()]
++        field_names_types = self.known_field_types.get(attr.lower(), {})
 +
 +        # 2. Get the field name and field type mappings if unknown
 +        if not field_names_types:
@@ -641,7 +629,7 @@ index 0000000000..c472c49f96
 +            )
 diff --git a/src/condor_scripts/adstash/ad_converters/transfer_epoch.py b/src/condor_scripts/adstash/ad_converters/transfer_epoch.py
 new file mode 100644
-index 0000000000..f26307d256
+index 0000000000..d0169c8a5e
 --- /dev/null
 +++ b/src/condor_scripts/adstash/ad_converters/transfer_epoch.py
 @@ -0,0 +1,228 @@
@@ -683,7 +671,7 @@ index 0000000000..f26307d256
 +        ):
 +        if kwargs.get("projection"):
 +            logging.warning("Projections are not used for transfer epoch ads")
-+        if kwargs.get("ignore_attrs"):
++        if kwargs.get("ignore_attrs") or kwargs.get("custom_ignore_attrs"):
 +            logging.warning("Attributes cannot be ignored for transfer epoch ads")
 +        super().__init__(
 +            timestamp_fields=timestamp_fields,
@@ -874,7 +862,7 @@ index 0000000000..f26307d256
 +
 +            yield doc
 diff --git a/src/condor_scripts/adstash/ad_sources/ad_file.py b/src/condor_scripts/adstash/ad_sources/ad_file.py
-index 44c98a199a..af30f62600 100644
+index 653aa08594..48f403ac88 100644
 --- a/src/condor_scripts/adstash/ad_sources/ad_file.py
 +++ b/src/condor_scripts/adstash/ad_sources/ad_file.py
 @@ -14,11 +14,13 @@
@@ -893,18 +881,12 @@ index 44c98a199a..af30f62600 100644
  
  
  class FileAdSource(GenericAdSource):
-@@ -48,23 +50,23 @@ class FileAdSource(GenericAdSource):
-         except IOError as e:
-             logging.error(f"Could not read {ad_file}: {str(e)}")
-             return
--        except Exception:
-+        except Exception as e:
-             logging.exception(f"Error while reading {ad_file} ({str(e)}), displaying traceback.")
+@@ -58,18 +60,18 @@ class FileAdSource(GenericAdSource):
              return
  
  
 -    def process_ads(self, interface, ads, metadata={}, chunk_size=0, **kwargs):
-+    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, metadata={}, chunk_size=0, **kwargs):
++    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, metadata=None, chunk_size=0, **kwargs):
          chunk = []
          for ad in ads:
              try:
@@ -922,7 +904,7 @@ index 44c98a199a..af30f62600 100644
                  interface.post_ads(chunk, metadata=metadata, **kwargs)
                  yield
 diff --git a/src/condor_scripts/adstash/ad_sources/generic.py b/src/condor_scripts/adstash/ad_sources/generic.py
-index 0baeffe246..1f3a80e3b9 100644
+index 0baeffe246..6f3aecae7c 100644
 --- a/src/condor_scripts/adstash/ad_sources/generic.py
 +++ b/src/condor_scripts/adstash/ad_sources/generic.py
 @@ -20,7 +20,8 @@ import traceback
@@ -940,7 +922,7 @@ index 0baeffe246..1f3a80e3b9 100644
  
  
 -    def process_ads(self, interface, ads, chunk_size=0, **kwargs):
-+    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, metadata={}, chunk_size=0, **kwargs):
++    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, metadata=None, chunk_size=0, **kwargs):
          chunk = []
          generic_checkpoint = None
 -        checkpoint_reached = False
@@ -983,10 +965,10 @@ index 0baeffe246..1f3a80e3b9 100644
 +            ads_posted += result["success"]
 +        yield generic_checkpoint
 diff --git a/src/condor_scripts/adstash/ad_sources/schedd_history.py b/src/condor_scripts/adstash/ad_sources/schedd_history.py
-index 7559692a28..94e5c1b06d 100644
+index 7559692a28..cb43dd6da3 100644
 --- a/src/condor_scripts/adstash/ad_sources/schedd_history.py
 +++ b/src/condor_scripts/adstash/ad_sources/schedd_history.py
-@@ -20,7 +20,9 @@ import classad2 as classad
+@@ -20,13 +20,15 @@ import classad2 as classad
  import traceback
  
  from adstash.ad_sources.generic import GenericAdSource
@@ -997,12 +979,23 @@ index 7559692a28..94e5c1b06d 100644
  
  
  class ScheddHistorySource(GenericAdSource):
-@@ -45,14 +47,14 @@ class ScheddHistorySource(GenericAdSource):
-         return schedd.history(constraint=True, projection=list(projection), **history_kwargs)
+ 
+ 
+-    def fetch_ads(self, schedd_ad, max_ads=10000, projection=set()):
++    def fetch_ads(self, schedd_ad, max_ads=10000, projection=None):
+         if projection:  # If user has defined a projection, make sure it contains required attrs
+             projection = projection | REQUIRED_ATTRS
+ 
+@@ -42,17 +44,17 @@ class ScheddHistorySource(GenericAdSource):
+             history_kwargs["since"] = classad.ExprTree(since_expr)
+             logging.warning(f"Getting ads from {schedd_ad['Name']} since {since_expr}.")
+         schedd = htcondor.Schedd(schedd_ad)
+-        return schedd.history(constraint=True, projection=list(projection), **history_kwargs)
++        return schedd.history(constraint=True, projection=list(projection or []), **history_kwargs)
  
  
 -    def process_ads(self, interface, ads, schedd_ad, metadata={}, chunk_size=0, **kwargs):
-+    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, schedd_ad, metadata={}, chunk_size=0, **kwargs):
++    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, schedd_ad, metadata=None, chunk_size=0, **kwargs):
          starttime = time.time()
          chunk = []
          schedd_checkpoint = None
@@ -1024,10 +1017,10 @@ index 7559692a28..94e5c1b06d 100644
              if (chunk_size > 0) and (len(chunk) >= chunk_size):
                  logging.debug(f"Posting {len(chunk)} ads from {schedd_ad['Name']}.")
 diff --git a/src/condor_scripts/adstash/ad_sources/schedd_job_epoch_history.py b/src/condor_scripts/adstash/ad_sources/schedd_job_epoch_history.py
-index 7e0ca49d74..473b7631dc 100644
+index 7e0ca49d74..4bd1df22c5 100644
 --- a/src/condor_scripts/adstash/ad_sources/schedd_job_epoch_history.py
 +++ b/src/condor_scripts/adstash/ad_sources/schedd_job_epoch_history.py
-@@ -20,7 +20,9 @@ import classad2 as classad
+@@ -20,13 +20,15 @@ import classad2 as classad
  import traceback
  
  from adstash.ad_sources.generic import GenericAdSource
@@ -1038,12 +1031,23 @@ index 7e0ca49d74..473b7631dc 100644
  
  
  class ScheddJobEpochHistorySource(GenericAdSource):
-@@ -45,14 +47,14 @@ class ScheddJobEpochHistorySource(GenericAdSource):
-         return schedd.jobEpochHistory(constraint=True, projection=list(projection), **history_kwargs)
+ 
+ 
+-    def fetch_ads(self, schedd_ad, max_ads=10000, projection=set()):
++    def fetch_ads(self, schedd_ad, max_ads=10000, projection=None):
+         if projection:  # If user has defined a projection, make sure it contains required attrs
+             projection = projection | REQUIRED_ATTRS
+ 
+@@ -42,17 +44,17 @@ class ScheddJobEpochHistorySource(GenericAdSource):
+             history_kwargs["since"] = classad.ExprTree(since_expr)
+             logging.warning(f"Getting job epoch ads from {schedd_ad['Name']} since {since_expr}.")
+         schedd = htcondor.Schedd(schedd_ad)
+-        return schedd.jobEpochHistory(constraint=True, projection=list(projection), **history_kwargs)
++        return schedd.jobEpochHistory(constraint=True, projection=list(projection or []), **history_kwargs)
  
  
 -    def process_ads(self, interface, ads, schedd_ad, metadata={}, chunk_size=0, **kwargs):
-+    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, schedd_ad, metadata={}, chunk_size=0, **kwargs):
++    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, schedd_ad, metadata=None, chunk_size=0, **kwargs):
          starttime = time.time()
          chunk = []
          schedd_checkpoint = None
@@ -1065,7 +1069,7 @@ index 7e0ca49d74..473b7631dc 100644
              if (chunk_size > 0) and (len(chunk) >= chunk_size):
                  logging.debug(f"Posting {len(chunk)} job epoch ads from {schedd_ad['Name']}.")
 diff --git a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
-index 750aeff303..511428286e 100644
+index 750aeff303..b154ce0f9f 100644
 --- a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
 +++ b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
 @@ -14,14 +14,12 @@
@@ -1176,9 +1180,9 @@ index 750aeff303..511428286e 100644
 -        ]
 -        super().__init__(*args, **kwargs)
 -
--
-     def fetch_ads(self, schedd_ad, max_ads=10000, projection=set()):
-+
++    def fetch_ads(self, schedd_ad, max_ads=10000, projection=None):
+ 
+-    def fetch_ads(self, schedd_ad, max_ads=10000, projection=set()):
          if projection:
 -            logging.warning(f"Custom projections are ignored for transfer history ads")
 +            logging.warning(f"Custom projections are not supported for transfer epoch history")
@@ -1392,7 +1396,7 @@ index 750aeff303..511428286e 100644
 -
 -
 -    def process_ads(self, interface, ads, schedd_ad, metadata={}, chunk_size=0, **kwargs):
-+    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, schedd_ad, metadata={}, chunk_size=0, **kwargs):
++    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, schedd_ad, metadata=None, chunk_size=0, **kwargs):
          starttime = time.time()
          chunk = []
          schedd_checkpoint = None
@@ -1444,10 +1448,10 @@ index 750aeff303..511428286e 100644
  
          endtime = time.time()
 diff --git a/src/condor_scripts/adstash/ad_sources/startd_history.py b/src/condor_scripts/adstash/ad_sources/startd_history.py
-index daf59529f9..ed506f979f 100644
+index daf59529f9..1076343bfa 100644
 --- a/src/condor_scripts/adstash/ad_sources/startd_history.py
 +++ b/src/condor_scripts/adstash/ad_sources/startd_history.py
-@@ -20,7 +20,9 @@ import classad2 as classad
+@@ -20,13 +20,15 @@ import classad2 as classad
  import traceback
  
  from adstash.ad_sources.generic import GenericAdSource
@@ -1458,12 +1462,23 @@ index daf59529f9..ed506f979f 100644
  
  
  class StartdHistorySource(GenericAdSource):
-@@ -45,14 +47,14 @@ class StartdHistorySource(GenericAdSource):
-         return startd.history(constraint=True, projection=list(projection), **history_kwargs)
+ 
+ 
+-    def fetch_ads(self, startd_ad, max_ads=10000, projection=set()):
++    def fetch_ads(self, startd_ad, max_ads=10000, projection=None):
+         if projection:  # If user has defined a projection, make sure it contains required attrs
+             projection = projection | REQUIRED_ATTRS
+ 
+@@ -42,17 +44,17 @@ class StartdHistorySource(GenericAdSource):
+             history_kwargs["since"] = classad.ExprTree(since_expr)
+             logging.warning(f"Getting ads from {startd_ad['Machine']} since {since_expr}.")
+         startd = htcondor.Startd(startd_ad)
+-        return startd.history(constraint=True, projection=list(projection), **history_kwargs)
++        return startd.history(constraint=True, projection=list(projection or []), **history_kwargs)
  
  
 -    def process_ads(self, interface, ads, startd_ad, metadata={}, chunk_size=0, **kwargs):
-+    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, startd_ad, metadata={}, chunk_size=0, **kwargs):
++    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, startd_ad, metadata=None, chunk_size=0, **kwargs):
          starttime = time.time()
          chunk = []
          startd_checkpoint = None
@@ -1885,10 +1900,10 @@ index f488547d6a..0000000000
 -    except Exception as e:
 -        logging.exception(f"Could not push transfer epoch ads from {schedd_ad['Name']}: {e.__class__.__name__}: {str(e)}")
 diff --git a/src/condor_scripts/adstash/config.py b/src/condor_scripts/adstash/config.py
-index 81492f4026..e44a6a8653 100644
+index 81492f4026..1644752207 100644
 --- a/src/condor_scripts/adstash/config.py
 +++ b/src/condor_scripts/adstash/config.py
-@@ -16,12 +16,14 @@
+@@ -16,6 +16,7 @@
  import os
  import re
  import sys
@@ -1896,14 +1911,7 @@ index 81492f4026..e44a6a8653 100644
  import logging
  import argparse
  
- import htcondor2 as htcondor
- 
- from pathlib import Path
-+from collections import OrderedDict
- 
- from adstash.interfaces.registry import ADSTASH_INTERFACES
- 
-@@ -52,9 +54,14 @@ def get_default_config(name="ADSTASH"):
+@@ -52,9 +53,14 @@ def get_default_config(name="ADSTASH"):
          "se_use_https": False,
          "se_timeout": 2 * 60,
          "se_bunch_size": 250,
@@ -1919,7 +1927,7 @@ index 81492f4026..e44a6a8653 100644
      }
      return defaults
  
-@@ -71,7 +78,9 @@ def get_htcondor_config(name="ADSTASH"):
+@@ -71,7 +77,9 @@ def get_htcondor_config(name="ADSTASH"):
          "threads": p.get(f"{name}_NUM_THREADS"),
          "collectors": p.get(f"{name}_READ_POOLS"),
          "schedds": p.get(f"{name}_READ_SCHEDDS"),
@@ -1929,7 +1937,7 @@ index 81492f4026..e44a6a8653 100644
          "read_schedd_history": p.get(f"{name}_SCHEDD_HISTORY"),
          "read_startd_history": p.get(f"{name}_STARTD_HISTORY"),
          "read_schedd_job_epoch_history": p.get(f"{name}_SCHEDD_JOB_EPOCH_HISTORY"),
-@@ -95,6 +104,10 @@ def get_htcondor_config(name="ADSTASH"):
+@@ -95,6 +103,10 @@ def get_htcondor_config(name="ADSTASH"):
          "se_ca_certs": p.get(f"{name}_ES_CA_CERTS", p.get(f"{name}_SE_CA_CERTS")),
          "se_log_mappings": p.get(f"{name}_SE_LOG_MAPPINGS"),
          "json_dir": p.get(f"{name}_JSON_DIR"),
@@ -1940,7 +1948,7 @@ index 81492f4026..e44a6a8653 100644
      }
  
      # Convert debug level
-@@ -140,7 +153,9 @@ def get_environment_config(name="ADSTASH"):
+@@ -140,7 +152,9 @@ def get_environment_config(name="ADSTASH"):
          "threads": env.get(f"{name}_NUM_THREADS"),
          "collectors": env.get(f"{name}_READ_POOLS"),
          "schedds": env.get(f"{name}_READ_SCHEDDS"),
@@ -1950,7 +1958,7 @@ index 81492f4026..e44a6a8653 100644
          "read_schedd_history": env.get(f"{name}_SCHEDD_HISTORY"),
          "read_startd_history": env.get(f"{name}_STARTD_HISTORY"),
          "read_schedd_job_epoch_history": env.get(f"{name}_SCHEDD_JOB_EPOCH_HISTORY"),
-@@ -164,6 +179,10 @@ def get_environment_config(name="ADSTASH"):
+@@ -164,6 +178,10 @@ def get_environment_config(name="ADSTASH"):
          "se_ca_certs": env.get(f"{name}_SE_CA_CERTS", env.get(f"{name}_CA_CERTS")),
          "se_log_mappings": env.get(f"{name}_SE_LOG_MAPPINGS"),
          "json_dir": env.get(f"{name}_JSON_DIR"),
@@ -1961,7 +1969,27 @@ index 81492f4026..e44a6a8653 100644
      }
  
      # remove None values
-@@ -351,6 +370,12 @@ def get_config(argv=None):
+@@ -226,8 +244,8 @@ def normalize_config_types(conf):
+         "startd_history_max_ads",
+         "schedd_history_timeout",
+         "startd_history_timeout",
+-        "es_timeout",
+-        "es_bunch_size",
++        "se_timeout",
++        "se_bunch_size",
+     ]
+     bools = [
+         "standalone",
+@@ -235,8 +253,6 @@ def normalize_config_types(conf):
+         "read_startd_history",
+         "read_schedd_job_epoch_history",
+         "read_schedd_transfer_epoch_history",
+-        "to_elasticsearch",
+-        "to_json",
+         "se_use_https",
+         "se_log_mappings",
+     ]
+@@ -351,6 +367,12 @@ def get_config(argv=None):
          metavar="LEVEL",
          help="Log level (CRITICAL/ERROR/WARNING/INFO/DEBUG) [default: %(default)s]",
      )
@@ -1974,7 +2002,7 @@ index 81492f4026..e44a6a8653 100644
      parser.add_argument(
          "--threads",
          type=int,
-@@ -439,6 +464,13 @@ def get_config(argv=None):
+@@ -439,6 +461,13 @@ def get_config(argv=None):
              "[default is to process all Schedds located by Collectors]"
          ),
      )
@@ -1988,7 +2016,7 @@ index 81492f4026..e44a6a8653 100644
      history_group.add_argument(
          "--startds",
          help=(
-@@ -446,6 +478,13 @@ def get_config(argv=None):
+@@ -446,6 +475,13 @@ def get_config(argv=None):
              "[default is to process all Startds located by Collectors]"
          ),
      )
@@ -2002,7 +2030,7 @@ index 81492f4026..e44a6a8653 100644
      history_group.add_argument(
          "--schedd_history_max_ads",
          type=int,
-@@ -557,7 +596,7 @@ def get_config(argv=None):
+@@ -557,7 +593,7 @@ def get_config(argv=None):
          "--se_no_log_mappings",
          dest="se_log_mappings",
          action="store_false",
@@ -2011,7 +2039,7 @@ index 81492f4026..e44a6a8653 100644
      )
      se_group.add_argument(
          "--se_ca_certs", "--ca_certs",
-@@ -580,6 +619,73 @@ def get_config(argv=None):
+@@ -580,6 +616,73 @@ def get_config(argv=None):
          help="Directory to store JSON files, which are named by timestamp [defaults to current directory]",
      )
  
@@ -2085,7 +2113,7 @@ index 81492f4026..e44a6a8653 100644
      # Parse args and add process name back to the list
      args = parser.parse_args(remaining_argv)
      args_dict = vars(args)
-@@ -589,6 +695,22 @@ def get_config(argv=None):
+@@ -589,6 +692,22 @@ def get_config(argv=None):
          args.schedd_history_projection = set(re.split(r"[\s,]+", args.schedd_history_projection.strip()))
      if args.startd_history_projection:
          args.startd_history_projection = set(re.split(r"[\s,]+", args.startd_history_projection.strip()))
@@ -2108,7 +2136,7 @@ index 81492f4026..e44a6a8653 100644
  
      # Check for deprecated args
      for arg in remaining_argv:
-@@ -601,4 +723,9 @@ def get_config(argv=None):
+@@ -601,4 +720,9 @@ def get_config(argv=None):
              logging.warning(f"Use of --json_local is deprecated, use --interface=jsonfile instead.")
              args.interface="jsonfile"
  
@@ -2120,10 +2148,10 @@ index 81492f4026..e44a6a8653 100644
      return args
 diff --git a/src/condor_scripts/adstash/index_setup.py b/src/condor_scripts/adstash/index_setup.py
 new file mode 100644
-index 0000000000..88339564ad
+index 0000000000..c34ed299e2
 --- /dev/null
 +++ b/src/condor_scripts/adstash/index_setup.py
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,201 @@
 +import logging
 +import json
 +
@@ -2220,8 +2248,7 @@ index 0000000000..88339564ad
 +            }
 +        }
 +    except (IndexError, ValueError, KeyError):
-+        logging.warning(f"{existing_settings}")
-+        pass
++        logging.debug(f"No existing total_fields.limit found in settings: {existing_settings}")
 +    existing_settings = field_limit_settings
 +
 +    ses = SearchEngineSettings(
@@ -2327,7 +2354,7 @@ index 0000000000..88339564ad
 +        )
 +    return (mappings, settings,)
 diff --git a/src/condor_scripts/adstash/interfaces/elasticsearch.py b/src/condor_scripts/adstash/interfaces/elasticsearch.py
-index 988dc0c64f..8feef11554 100644
+index 988dc0c64f..9f3ad4ec36 100644
 --- a/src/condor_scripts/adstash/interfaces/elasticsearch.py
 +++ b/src/condor_scripts/adstash/interfaces/elasticsearch.py
 @@ -15,10 +15,8 @@
@@ -2427,7 +2454,16 @@ index 988dc0c64f..8feef11554 100644
  
          # find which index is reporting as writable
          for index, alias_info in indices.items():
-@@ -121,189 +153,107 @@ class ElasticsearchInterface(GenericInterface):
+@@ -114,196 +146,114 @@ class ElasticsearchInterface(GenericInterface):
+                 logging.info(f"{alias} is an alias, found active index {index}.")
+                 return index
+ 
+-        # fallback to lexigraphically last index
++        # fallback to lexicographically last index
+         indices = list(indices.keys())
+         indices.sort(reverse=True)
+-        logging.warning(f"Could not find an activate index for alias {alias}, trying {indices[0]}")
++        logging.warning(f"Could not find an active index for alias {alias}, trying {indices[0]}")
          return indices[0]
  
  
@@ -2643,7 +2679,7 @@ index 988dc0c64f..8feef11554 100644
 +            client.indices.put_settings(index=index, settings=settings)
 +
 +
-+    def make_bulk_body(self, docs: list, metadata={}) -> str:
++    def make_bulk_body(self, docs: list, metadata=None) -> str:
 +        """
 +        Elasticsearch supports bulk indexing via NDJSON, where
 +        an action (e.g. "index") is followed by the data object
@@ -2652,7 +2688,7 @@ index 988dc0c64f..8feef11554 100644
 +        """
 +        body = []
 +        for doc_id, doc in docs:
-+            doc["metadata"] = {**doc.get("metadata", {}), **metadata}  # merge existing with chunk-level metadata
++            doc["metadata"] = {**doc.get("metadata", {}), **(metadata or {})}  # merge existing with chunk-level metadata
 +            action = {"index": {"_id": doc_id}}  # index the doc w/ this id
 +            body.append(json.dumps(action))
 +            body.append(json.dumps(doc, sort_keys=True, default=classad_json_serializer))
@@ -2722,7 +2758,7 @@ index 988dc0c64f..8feef11554 100644
  
  
 -    def post_ads(self, ads, index, metadata={}, **kwargs):
-+    def post_ads(self, ads: list, index: str, metadata={}, **kwargs) -> dict:
++    def post_ads(self, ads: list, index: str, metadata=None, **kwargs) -> dict:
 +        """
 +        Push a list of JSON-ified ads in the format
 +        [(doc_id, ad), (doc_id, ad), ...]
@@ -2806,7 +2842,7 @@ index 2f4b80726e..3df5b9ce5f 100644
 +            n += 1
 +        return {"success": n, "error": 0}
 diff --git a/src/condor_scripts/adstash/interfaces/json_file.py b/src/condor_scripts/adstash/interfaces/json_file.py
-index ce7e0fa431..15fc9a8da0 100644
+index ce7e0fa431..a342c7310e 100644
 --- a/src/condor_scripts/adstash/interfaces/json_file.py
 +++ b/src/condor_scripts/adstash/interfaces/json_file.py
 @@ -15,174 +15,40 @@
@@ -2849,7 +2885,7 @@ index ce7e0fa431..15fc9a8da0 100644
  
  
 -    def make_body(self, ads, metadata={}):
-+    def make_bulk_body(self, docs: list, metadata={}) -> str:
++    def make_bulk_body(self, docs: list, metadata=None) -> str:
          body = []
 -        for id_, ad in ads:
 -            if metadata:
@@ -2966,7 +3002,7 @@ index ce7e0fa431..15fc9a8da0 100644
 -        return mappings
 +        for doc_id, doc in docs:
 +            doc["_id"] = doc_id
-+            doc["metadata"] = metadata  # bolt on the metadata
++            doc["metadata"] = metadata or {}  # bolt on the metadata
 +            body.append(doc)
  
 +        if self.json_legacy:
@@ -2988,10 +3024,11 @@ index ce7e0fa431..15fc9a8da0 100644
 +        return json.dumps(body, indent=2, sort_keys=True, default=classad_json_serializer)
  
  
-     def post_ads(self, ads, metadata={}, **kwargs):
+-    def post_ads(self, ads, metadata={}, **kwargs):
 -        body = self.make_body(ads, metadata)
 -        if len(body) > 0:
 -            self.write_mappings(self.log_mappings, self.json_dir, **kwargs)
++    def post_ads(self, ads, metadata=None, **kwargs):
  
 +        body = self.make_bulk_body(ads, metadata)
          json_file = self.json_dir / f"{time.time()}.json"
@@ -3209,7 +3246,7 @@ index 7b282c9c12..6fa06c3736 100644
  ADSTASH_INTERFACES = list(ADSTASH_INTERFACE_REGISTRY.keys())
 diff --git a/src/condor_scripts/adstash/main.py b/src/condor_scripts/adstash/main.py
 new file mode 100644
-index 0000000000..bde4074fd2
+index 0000000000..fd7dd2833e
 --- /dev/null
 +++ b/src/condor_scripts/adstash/main.py
 @@ -0,0 +1,230 @@
@@ -3317,10 +3354,10 @@ index 0000000000..bde4074fd2
 +        if source_type == "ad_file" and args.read_ad_file is not None:
 +
 +            # Currently, we assume generic ad files are from job history
-+            mappings, settings = setup_index(interface=interface, ad_type="history", args=args)
++            mappings, _ = setup_index(interface=interface, ad_type="history", args=args)
 +            converter = AD_TYPE_CONVERTERS["history"](
 +                mapping=mappings,
-+                # TODO get combined ignore attrs
++                custom_ignore_attrs=args.custom_ignore_attrs,
 +            )
 +
 +            metadata["condor_adstash_source"] = "ad_file"
@@ -3337,11 +3374,11 @@ index 0000000000..bde4074fd2
 +                    logging.warning(f"Skipping querying {daemon_type}s since --read_ad_file was set.")
 +                    continue
 +
-+                mappings, settings = setup_index(interface=interface, ad_type=ad_type, args=args)
++                mappings, _ = setup_index(interface=interface, ad_type=ad_type, args=args)
 +                converter = AD_TYPE_CONVERTERS[ad_type](
 +                    mapping=mappings,
 +                    projection=vars(args)[f"{daemon_type}_history_projection"],
-+                    # TODO get combined ignore attrs
++                    custom_ignore_attrs=args.custom_ignore_attrs,
 +                )
 +
 +                name_attr = "Name"
@@ -3496,10 +3533,10 @@ index 0000000000..01d4392a34
 +}
 diff --git a/src/condor_scripts/adstash/mapping/functions.py b/src/condor_scripts/adstash/mapping/functions.py
 new file mode 100644
-index 0000000000..3c1f85824e
+index 0000000000..6293af9e16
 --- /dev/null
 +++ b/src/condor_scripts/adstash/mapping/functions.py
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,180 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -3518,7 +3555,10 @@ index 0000000000..3c1f85824e
 +import logging
 +
 +
-+def get_ignore_attrs(custom_mappings={}, custom_ignore_attrs=set(), default_ignore_attrs=set()) -> set:
++def get_ignore_attrs(custom_mappings=None, custom_ignore_attrs=None, default_ignore_attrs=None) -> set:
++    custom_mappings = custom_mappings or {}
++    custom_ignore_attrs = custom_ignore_attrs or set()
++    default_ignore_attrs = default_ignore_attrs or set()
 +    # First, duplicate lowercase version of defaults
 +    ignore_attrs = default_ignore_attrs | {attr.lower() for attr in default_ignore_attrs}
 +    # Then, do not ignore any attrs that have been defined in the custom mappings
@@ -3549,13 +3589,13 @@ index 0000000000..3c1f85824e
 +# 3. Default properties
 +def merge_properties(*properties_in: dict) -> dict:
 +    if len(properties_in) < 2:
-+        raise ValueError("merge_proprties requires at least two dicts")
++        raise ValueError("merge_properties requires at least two dicts")
 +
 +    properties_out = {}
 +
 +    # Start with properties from the first argument
 +    flattened_properties_in = flatten_mapping_properties(properties_in[0])
-+    properties_out.update(flattened_properties_in)
++    properties_out.update({k: v.copy() for k, v in flattened_properties_in.items()})
 +
 +    # Merge the other properties, adding multi-fields when possible if there are conflicts
 +    for property_in in properties_in[1:]:
@@ -3565,7 +3605,7 @@ index 0000000000..3c1f85824e
 +
 +            # Add the field if it doesn't exist yet
 +            if field not in properties_out:
-+                properties_out[field] = mapping
++                properties_out[field] = mapping.copy()
 +                continue
 +
 +            existing_field_type = properties_out[field].get("type", "object")
@@ -3590,7 +3630,7 @@ index 0000000000..3c1f85824e
 +                if new_field_type in properties_out[field]["fields"]:
 +                    continue
 +
-+                # Add the mapping to the existing mutli-fields
++                # Add the mapping to the existing multi-fields
 +                properties_out[field]["fields"][new_field_type] = mapping
 +
 +            else:
@@ -4871,10 +4911,10 @@ index 0000000000..26eaf4f997
 +]
 diff --git a/src/condor_scripts/adstash/settings.py b/src/condor_scripts/adstash/settings.py
 new file mode 100644
-index 0000000000..bb16c45f36
+index 0000000000..0ab1b28318
 --- /dev/null
 +++ b/src/condor_scripts/adstash/settings.py
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,219 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -4956,12 +4996,12 @@ index 0000000000..bb16c45f36
 +
 +class SearchEngineSettings():
 +
-+    def __init__(self, index_name, mappings, custom_settings={}, existing_settings={}):
++    def __init__(self, index_name, mappings, custom_settings=None, existing_settings=None):
 +        self.alias = index_name
 +        self.mappings = mappings
 +        self.existing_settings = existing_settings or DEFAULT_INITIAL_SETTINGS
 +        self.settings = self.flatten_settings(self.existing_settings)
-+        self.update_settings = self.flatten_settings(custom_settings)
++        self.update_settings = self.flatten_settings(custom_settings or {})
 +        self._calculate_update_settings_fields_limit()
 +        self.index_template_name = f"{index_name}-template"
 +        self.index_definition = {
@@ -4969,7 +5009,8 @@ index 0000000000..bb16c45f36
 +            "mappings": self.mappings,
 +        }
 +
-+    def flatten_settings(self, settings={}, parent=""):
++    def flatten_settings(self, settings=None, parent=""):
++        settings = settings or {}
 +        flattened_settings = {}
 +        for k, v in settings.items():
 +            if parent:
@@ -5005,7 +5046,7 @@ index 0000000000..bb16c45f36
 +    def _calculate_update_settings_fields_limit(self):
 +        previous_limit = int(self.settings.get("index.mapping.total_fields.limit", 0))
 +        self.update_settings["index.mapping.total_fields.limit"] = calculate_field_limit(self.mappings, previous_limit)
-+        # Using limit = 5000 as an arbitrary point to start warning about performance degredation
++        # Using limit = 5000 as an arbitrary point to start warning about performance degradation
 +        if self.update_settings["index.mapping.total_fields.limit"] > 5000 and self.update_settings["index.mapping.total_fields.limit"] > previous_limit:
 +            logging.warning(f"Large index.mapping.total_fields.limit: {self.update_settings['index.mapping.total_fields.limit']}")
 +            logging.warning("Fields accumulate over time due to new attributes (custom or first-class).")
@@ -5212,7 +5253,7 @@ index d81229808c..0d97549a72 100644
 +        return None
 +    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 diff --git a/src/condor_scripts/condor_adstash b/src/condor_scripts/condor_adstash
-index a2a68a1dbf..4c58c6a45d 100755
+index a2a68a1dbf..b069b8b773 100755
 --- a/src/condor_scripts/condor_adstash
 +++ b/src/condor_scripts/condor_adstash
 @@ -29,7 +29,7 @@ import htcondor2 as htcondor
@@ -5237,16 +5278,14 @@ index a2a68a1dbf..4c58c6a45d 100755
      # set up logging
      set_up_logging(args)
  
-diff --git a/src/condor_utils/param_info.in b/src/condor_utils/param_info.in
-index 5ae9458afe..77a6db5ba7 100644
---- a/src/condor_utils/param_info.in
-+++ b/src/condor_utils/param_info.in
-@@ -6081,7 +6081,7 @@ default=250
- [ADSTASH_SE_INDEX_NAME]
- description=What search engine index should condor_adstash push ads to
- type=string
--default=htcondor-000001
-+default=htcondor
- [ADSTASH_SE_LOG_MAPPINGS]
- description=Should condor_adstash log mappings used with search engine interfaces
- type=bool
+@@ -90,8 +96,8 @@ def main():
+ 
+     # pretty print a list of args (but no passwords) if debugging
+     safe_args = vars(args).copy()
+-    if "es_password" in safe_args:
+-        safe_args["es_password"] = "<hidden>"
++    if "se_password" in safe_args:
++        safe_args["se_password"] = "<hidden>"
+     logging.debug(f"Using config: {pprint.pformat(safe_args)}")
+ 
+     # catch signals
