@@ -1,12 +1,25 @@
+diff --git a/src/condor_examples/condor_config.local.adstash b/src/condor_examples/condor_config.local.adstash
+index 33a5f39d85..85bc6ca8ed 100644
+--- a/src/condor_examples/condor_config.local.adstash
++++ b/src/condor_examples/condor_config.local.adstash
+@@ -36,7 +36,7 @@ use feature: adstash
+ #ADSTASH_SE_USERNAME = 
+ #ADSTASH_SE_PASSWORD_FILE = 
+ #ADSTASH_SE_USE_HTTPS = False
+-#ADSTASH_SE_INDEX_NAME = htcondor-000001
++#ADSTASH_SE_INDEX_NAME = htcondor
+ 
+ ###
+ ### Rarely changed macros
 diff --git a/src/condor_scripts/adstash/ad_converters/__init__.py b/src/condor_scripts/adstash/ad_converters/__init__.py
 new file mode 100644
 index 0000000000..e69de29bb2
 diff --git a/src/condor_scripts/adstash/ad_converters/generic.py b/src/condor_scripts/adstash/ad_converters/generic.py
 new file mode 100644
-index 0000000000..d10545b6a7
+index 0000000000..d9530c3072
 --- /dev/null
 +++ b/src/condor_scripts/adstash/ad_converters/generic.py
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,459 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -24,12 +37,14 @@ index 0000000000..d10545b6a7
 +
 +import re
 +import json
++import math
 +import time
 +import logging
 +
 +from functools import lru_cache
 +from collections import defaultdict, OrderedDict
 +
++from adstash.utils import classad_json_serializer
 +from adstash.mapping.common import MAX_KEYWORD_LEN
 +from adstash.mapping.functions import get_ignore_attrs, merge_properties, merge_dynamic_templates
 +
@@ -39,14 +54,39 @@ index 0000000000..d10545b6a7
 +_LAUNCH_TIME = int(time.time())
 +
 +
++def _normalize_target_bool_attr(attr: str) -> str:
++    attr = attr.lower()
++    prefix = next((x for x in ["want", "has", "is"] if attr.startswith(x)), "")
++    middle = "_" if len(attr) > len(prefix) and attr[len(prefix)] == "_" else ""
++    right = attr[len(prefix) + len(middle):]
++    return f"{prefix.capitalize()}{middle}{right.capitalize()}"
++
++
++DYNAMIC_TEMPLATE_FIELD_NAME_NORMALIZERS = {
++    "target_bool_attrs": _normalize_target_bool_attr,
++}
++
++
++def coerce_int(i):
++    try:
++        return int(i)
++    except (ValueError, TypeError):
++        pass
++    return round(float(i))
++
++
 +def strict_bool(i):
 +    if isinstance(i, bool):
 +        return bool(i)
 +    if isinstance(i, str):
-+        if str(i).lower() in {"1", "t", "true"}:
++        if i.lower() in {"1", "t", "true"}:
 +            return True
-+        if str(i).lower() in {"0", "f", "false"}:
++        if i.lower() in {"0", "f", "false"}:
 +            return False
++        try:  # "1.0" / "0.0"
++            return strict_bool(float(i))
++        except ValueError:
++            pass
 +    if isinstance(i, (int, float)):
 +        if abs(i - 1) < 1e-8:  # allow for some tiny error
 +            return True
@@ -55,13 +95,20 @@ index 0000000000..d10545b6a7
 +    raise ValueError(f"The truth value of {i} is ambiguous")
 +
 +
++def finite_float(x):
++    v = float(x)
++    if not math.isfinite(v):
++        raise ValueError(f"Non-finite float value: {v}")
++    return v
++
++
 +FIELD_TYPE_MAP = {
 +    "text": str,
 +    "keyword": str,
-+    "float": float,
-+    "double": float,
-+    "long": int,
-+    "date": int,
++    "float": finite_float,
++    "double": finite_float,
++    "long": coerce_int,
++    "date": coerce_int,
 +    "boolean": strict_bool,
 +    "object": dict,
 +    "nested": list,
@@ -114,7 +161,7 @@ index 0000000000..d10545b6a7
 +
 +    def get_known_field_types(self, mapping: dict, parent_field_names=[]) -> defaultdict:
 +        '''
-+        Build up a map of sets of known field names and types,
++        Build up a map of known field names and types,
 +        keyed on the lowercased attribute names. For example,
 +        if "lastremotewallclocktime" and "LastRemoteWallClockTime"
 +        are both defined in the mapping as keyword and long,
@@ -122,8 +169,8 @@ index 0000000000..d10545b6a7
 +        {
 +            ...
 +            "lastremotewallclocktime": {
-+                ("lastremotewallclocktime": str),
-+                ("LastRemoteWallClockTime": int),
++                "lastremotewallclocktime": str,
++                "LastRemoteWallClockTime": int,
 +            }
 +            ...
 +        }
@@ -132,19 +179,19 @@ index 0000000000..d10545b6a7
 +        {
 +            ...
 +            "numholdsbyreason.failedtocheckpoint": {
-+                ("NumHoldsByReason.FailedToCheckpoint": int),
++                "NumHoldsByReason.FailedToCheckpoint": int,
 +            }
 +            ...
 +        }
 +        '''
-+        known_field_types = defaultdict(set)
++        known_field_types = defaultdict(dict)
 +        for base_field_name, field_properties in mapping["properties"].items():
 +            field_name_heirarchy = parent_field_names + [base_field_name]
 +            flattened_field_name = ".".join(field_name_heirarchy)
 +            if self.projection is not None and flattened_field_name.lower() not in self.projection:
 +                continue
 +            field_type = FIELD_TYPE_MAP[field_properties.get("type", "object")]
-+            known_field_types[flattened_field_name.lower()].add((flattened_field_name, field_type,))
++            known_field_types[flattened_field_name.lower()][flattened_field_name] = field_type
 +            if field_type is dict and "properties" in field_properties:
 +                known_field_types = known_field_types | self.get_known_field_types(field_properties, field_name_heirarchy)
 +        return known_field_types
@@ -166,6 +213,10 @@ index 0000000000..d10545b6a7
 +            elif dt_name == "DEFAULT":
 +                match_type = "default"
 +                match_pattern = ""
++            elif match_pattern.count("*") > 1:
++                # Only a single * wildcard is supported in our implementation, even though
++                # multiple * wildcards are valid in Elasticsearch dynamic templates.
++                logging.warning(f"Dynamic template {dt_name} has multiple * wildcards in match pattern '{match_pattern}', which is not supported and will never match.")
 +            matchers[dt_name] = {
 +                "match_type": match_type,
 +                "match_pattern": match_pattern,
@@ -185,14 +236,14 @@ index 0000000000..d10545b6a7
 +        field_type = self.dynamic_templates_matchers["DEFAULT"]["field_type"]
 +        for dt_name, dt in self.dynamic_templates_matchers.items():
 +            if dt["match_type"] == "regex" and dt["match_pattern"].match(attr):
-+                field_name = attr
++                field_name = DYNAMIC_TEMPLATE_FIELD_NAME_NORMALIZERS.get(dt_name, lambda x: x)(attr)
 +                field_type = dt["field_type"]
 +                self.log_once(f"Attr {attr} matched dynamic template {dt_name}", logging.info)
 +                break
-+            if dt["match_type"] == "wildcard":
++            if dt["match_type"] == "wildcard" and "*" in dt["match_pattern"]:
 +                left, right = dt["match_pattern"].split("*", maxsplit=1)
 +                if attr.startswith(left) and attr.endswith(right):
-+                    field_name = attr
++                    field_name = DYNAMIC_TEMPLATE_FIELD_NAME_NORMALIZERS.get(dt_name, lambda x: x)(attr)
 +                    field_type = dt["field_type"]
 +                    self.log_once(f"Attr {attr} matched dynamic template {dt_name}", logging.info)
 +                    break
@@ -201,91 +252,121 @@ index 0000000000..d10545b6a7
 +                self.log_once(f"Encountered new/unknown attr {attr}")
 +        return field_name, field_type
 +
-+    def convert_attr_to_dict(self, attr: str, value, full_ad: classad.ClassAd) -> dict:
++    def convert_attr_to_dict(self, attr: str, value, full_ad, preserve_case: bool = False, plain_dict: bool = False) -> dict:
 +        """
 +        Convert the given ClassAd attribute-value pair to a dict
 +        which can be merged into a document.
++
++        If preserve_case is True, the original attr name casing is used as the
++        field name when no mapping is found (instead of the lowercased DEFAULT).
++        Use this when recursing into a known object field.
 +        """
 +        doc = {}
 +
 +        # 1. Get the field name and field type mappings if known
 +        known_mappings = True
-+        field_names_types = dict(self.known_field_types[attr.lower()])
++        field_names_types = self.known_field_types[attr.lower()]
 +
 +        # 2. Get the field name and field type mappings if unknown
 +        if not field_names_types:
 +            known_mappings = False
-+            field_names_types = dict([self.map_unknown_field_type(attr)])
++            mapped_name, mapped_type = self.map_unknown_field_type(attr)
++            if preserve_case:
++                mapped_name = attr
++            field_names_types = {mapped_name: mapped_type}
 +
 +        # 3. Map attr to all matching fields
 +        for field_name, field_type in field_names_types.items():
 +
 +            field_value = None
 +
-+            # 4. Handle objects separately
-+            if isinstance(value, (dict, classad.ClassAd)):
++            # 4. Handle lists (nested fields) separately
++            if isinstance(value, list):
++
++                if known_mappings and field_type is list:
++                    converted = []
++                    failed = False
++                    for item in value:
++                        if not plain_dict:
++                            try:
++                                item = json.loads(json.dumps(item, default=classad_json_serializer))
++                            except Exception:
++                                self.log_once(f"Failed to serialize item in {attr} to JSON")
++                                doc[field_name.lower()] = self.truncate(field_name.lower(), str(value))
++                                failed = True
++                                continue
++                        converted.append(item)
++                    if not (failed and field_name == field_name.lower()):
++                        doc[field_name] = converted
++                else:
++                    try:
++                        field_value = json.dumps(value, default=classad_json_serializer)
++                    except Exception:
++                        self.log_once(f"Failed to convert list in {attr} to JSON")
++                        field_value = str(value)
++                    doc[field_name.lower()] = self.truncate(field_name.lower(), field_value)
++                continue
++
++            # 5. Handle objects separately
++            elif isinstance(value, (dict, classad.ClassAd)):
 +
 +                # Make sure the mapping is expected
-+                if known_mappings and field_type is not dict:
++                if known_mappings and field_type not in (dict, str,):
 +                    self.log_once(f"Could not convert {field_name} to {field_type}, got a dict-like")
 +                    continue
 +
 +                # If we know this to be a string, try to make it a JSON blob
 +                if known_mappings and field_type is str:
-+                    if isinstance(value, classad.ClassAd):
-+                        try:
-+                            field_value = value.printJson()
-+                        except Exception:
-+                            self.log_once(f"Failed to convert ClassAd object in {attr} to JSON")
-+                            continue
-+                    else:
-+                        try:
-+                            field_value = json.dumps(value)
-+                        except Exception:
-+                            self.log_once(f"Failed to convert dict-like object in {attr} to JSON")
-+                            continue
++                    try:
++                        field_value = json.dumps(value, default=classad_json_serializer)
++                    except Exception:
++                        self.log_once(f"Failed to convert dict-like object in {attr} to JSON")
++                        continue
 +
 +                else:  # Otherwise recursively convert it, flattening the namespace
 +                    if not known_mappings:  # Preserve original case if we don't know what this is
 +                        field_name = attr  # because it might match a dynamic template later.
-+                    doc.update(self.convert_ad_to_dict(value, field_name))
++                    doc.update(self.convert_ad_to_dict(value, field_name, preserve_case=known_mappings, plain_dict=plain_dict))
 +                    continue  # Then at this point, this mapping is already done
 +
-+            # 5. Handle everything else
++            # 6. Handle everything else
 +            else:
 +
-+                # Evaluate any ClassAd expressions
-+                # (in the context of their ad if possible)
-+                if isinstance(value, classad.ExprTree):
-+                    try:
-+                        if isinstance(full_ad, classad.ClassAd):
-+                            eval_value = value.eval(full_ad)
-+                        else:
-+                            eval_value = value.eval()
-+                    except Exception:
-+                        self.log_once(f"Failed to evaluate {attr} in the context of its ClassAd")
-+                        eval_value = classad.Value.Error
-+
-+                    # If eval doesn't work, store the expr as a string if possible
-+                    if isinstance(eval_value, (classad.Value, classad.ExprTree)):
-+                        field_name = f"{field_name}_EXPR"
-+                        field_type = str
++                if not plain_dict:
++                    # Evaluate any ClassAd expressions
++                    # (in the context of their ad if possible)
++                    if isinstance(value, classad.ExprTree):
 +                        try:
-+                            field_value = field_type(value)
++                            if isinstance(full_ad, classad.ClassAd):
++                                eval_value = value.eval(full_ad)
++                            else:
++                                eval_value = value.eval()
 +                        except Exception:
-+                            self.log_once(f"Failed to get string repr of expr in {attr}")
-+                            continue
-+                    else:
-+                        value = eval_value
++                            self.log_once(f"Failed to evaluate {attr} in the context of its ClassAd")
++                            eval_value = classad.Value.Error
 +
-+                # Prevent Error or Undefined ClassAd values from getting through,
-+                # for example, classad.Value.Undefined acts a literal 2 for
-+                # any type casting done on it, which we don't want.
-+                if isinstance(value, classad.Value):
-+                    self.log_once(f"Got ClassAd value {value.name} for {attr}", logging.info)
-+                    continue
++                        # If eval doesn't work, store the expr as a string if possible
++                        if isinstance(eval_value, (classad.Value, classad.ExprTree)):
++                            field_name = f"{field_name}_EXPR"
++                            field_type = str
++                            try:
++                                field_value = field_type(value)
++                            except Exception:
++                                self.log_once(f"Failed to get string repr of expr in {attr}")
++                                continue
++                        else:
++                            value = eval_value
++
++                    # Prevent Error or Undefined ClassAd values from getting through,
++                    # for example, classad.Value.Undefined acts a literal 2 for
++                    # any type casting done on it, which we don't want.
++                    if isinstance(value, classad.Value):
++                        self.log_once(f"Got ClassAd value {value.name} for {attr}", logging.info)
++                        continue
 +
 +                try:
++                    if field_type is list and not isinstance(value, list):
++                        raise TypeError(f"expected a list")
 +                    field_value = field_type(value)
 +                except Exception:
 +                    self.log_once(f"Failed to cast {attr} = {value} as a {field_type.__name__}")
@@ -295,19 +376,33 @@ index 0000000000..d10545b6a7
 +                self.log_once(f"Failed to get a usable value for {attr}", logging.error)
 +                continue
 +
-+            # 6. Truncate strings if necessary
-+            if isinstance(field_value, str) and len(field_value) > MAX_KEYWORD_LEN:
-+                self.log_once(f"Had to truncate value of {field_name} (original length {len(field_value)})")
-+                field_value = f"{field_value[:MAX_KEYWORD_LEN-3]}..."
++            # 7. Truncate strings if necessary
++            field_value = self.truncate(field_name, field_value)
 +
-+            # 7. Store value
++            # 8. Store value
 +            doc[field_name] = field_value
 +
 +        return doc
 +
-+    def convert_ad_to_dict(self, ad, parent_attr="") -> dict:
++    def truncate(self, field_name: str, value) -> str:
 +        """
-+        Convert a ClassAd to a document (dict) with flattened objects
++        Shorten strings to MAX_KEYWORD_LEN if necessary
++        """
++        if isinstance(value, str) and len(value) > MAX_KEYWORD_LEN:
++            self.log_once(f"Had to truncate value of {field_name} (original length {len(value)})")
++            return f"{value[:MAX_KEYWORD_LEN-3]}..."
++        return value
++
++    def convert_ad_to_dict(self, ad, parent_attr="", preserve_case: bool = False, plain_dict: bool = False) -> dict:
++        """
++        Convert a ClassAd (or plain dict) to a document (dict) with flattened objects.
++
++        If preserve_case is True, unknown subfield names retain their original
++        casing rather than being lowercased by the DEFAULT dynamic template fallback.
++
++        If plain_dict is True, classad-specific processing (ExprTree evaluation,
++        classad.Value guards, JSON roundtrip on list items) is skipped, which is
++        more efficient when the input is already a plain Python dict.
 +        """
 +        doc = {}
 +
@@ -322,12 +417,17 @@ index 0000000000..d10545b6a7
 +            if attr in self.ignore_attrs:
 +                continue
 +
-+            # 4. Skip any attrs not in the projection
-+            if self.projection is not None and attr.lower() not in self.projection:
-+                continue
++            # 4. Skip any attrs not in the projection.
++            # Use a prefix check so that sub-properties of projected object fields
++            # (e.g. TransferInputStats.FileCount when TransferInputStats is projected)
++            # are not filtered out during recursion.
++            if self.projection is not None:
++                attr_lower = attr.lower()
++                if attr_lower not in self.projection and not any(attr_lower.startswith(p + ".") for p in self.projection):
++                    continue
 +
 +            # 5. Convert attr
-+            doc.update(self.convert_attr_to_dict(attr, value, ad))
++            doc.update(self.convert_attr_to_dict(attr, value, ad, preserve_case=preserve_case, plain_dict=plain_dict))
 +
 +        return doc
 +
@@ -541,10 +641,10 @@ index 0000000000..c472c49f96
 +            )
 diff --git a/src/condor_scripts/adstash/ad_converters/transfer_epoch.py b/src/condor_scripts/adstash/ad_converters/transfer_epoch.py
 new file mode 100644
-index 0000000000..9d33465e43
+index 0000000000..f26307d256
 --- /dev/null
 +++ b/src/condor_scripts/adstash/ad_converters/transfer_epoch.py
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,228 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -591,11 +691,11 @@ index 0000000000..9d33465e43
 +        )
 +
 +    def expand_plugin_result_ads(self, ads, my_attr_name=None):
-+        debug_results = []
-+        error_results = iter(())
-+        result = {}
 +        file_number = 0
 +        for ad in ads:
++            result = {}
++            debug_results = []
++            error_results = iter(())
 +            result["TransferFileNumber"] = file_number
 +            file_number += 1
 +            for attr, value in ad.items():
@@ -628,7 +728,7 @@ index 0000000000..9d33465e43
 +                        try:
 +                            yield debug_result | result | error_result
 +                        except TypeError:  # backwards compat
-+                            yield {**debug_result, **result}
++                            yield {**debug_result, **result, **error_result}
 +                    else:  # otherwise only add identifying attrs
 +                        for attr in ("TransferProtocol", "TransferType", "TransferUrl"):
 +                            debug_result[attr] = result.get(attr)
@@ -680,7 +780,7 @@ index 0000000000..9d33465e43
 +                    continue
 +                if attr.lower().startswith("transfer"):
 +                    attr = f"Attempt{attr[len('transfer'):]}"
-+                result.update(self.convert_attr_to_dict(attr, value, ad))
++                attempt_result.update(self.convert_attr_to_dict(attr, value, ad))
 +            try:
 +                yield result | attempt_result
 +            except TypeError:  # backwards compat
@@ -701,7 +801,7 @@ index 0000000000..9d33465e43
 +                    error_result.update(self.convert_attr_to_dict(attr, value, ad))
 +            yield error_result
 +
-+    def convert_ad_to_dict(self, ad, parent_attr=""):
++    def convert_transfer_ad_to_dicts(self, ad, parent_attr=""):
 +        """
 +        Convert a transfer epoch ClassAd and yield a document (dict) with flattened objects.
 +        Multiple docs could be yielded per transfer epoch ClassAd.
@@ -721,20 +821,22 @@ index 0000000000..9d33465e43
 +
 +            # 3. Pop out plugin result lists
 +            if attr.endswith("PluginResultList"):
-+                plugin_results.append(self.expand_plugin_result_ads(value))
++                plugin_results.append(self.expand_plugin_result_ads(value, my_attr_name=attr))
 +
 +            # 4. Convert top-level attrs
 +            else:
 +                doc.update(self.convert_attr_to_dict(attr, value, ad))
 +
 +        # 5. Loop over plugin results, append and yield them
-+        for plugin_result in chain(*plugin_results or [{}]):
-+            try:
-+                yield doc | plugin_result
-+            except TypeError:  # backwards compat
-+                yield {**doc, **plugin_result}
-+
-+        return doc
++        if not plugin_results:
++            doc["NoPluginResults"] = True
++            yield doc
++        else:
++            for plugin_result in chain(*plugin_results):
++                try:
++                    yield doc | plugin_result
++                except TypeError:  # backwards compat
++                    yield {**doc, **plugin_result}
 +
 +    def get_unique_doc_id(self, doc):
 +        """
@@ -752,16 +854,17 @@ index 0000000000..9d33465e43
 +
 +    def add_additional_fields(self, doc, ad):
 +        # Python None converts to JSON null. Helpfully, Elasticsearch will ignore null values.
-+        doc["ScheddName"] = ad.get("GlobalJobId", "").split("#", maxsplit=1)[0] or None
++        if "ScheddName" not in doc:
++            doc["ScheddName"] = ad.get("GlobalJobId", "").split("#", maxsplit=1)[0] or None
 +        doc["ClusterId"] = ad.get("ClusterId", ad.get("GlobalJobId", "#.").split("#")[1].split(".")[0]) or None
 +        doc["ProcId"] = ad.get("ProcId", ad.get("GlobalJobId", "#.").split("#")[1].split(".")[-1]) or None
 +        doc["StartdSlot"] = ad.get("RemoteHost", "").split("@", maxsplit=1)[0] or None
 +        doc["StartdName"] = ad.get("RemoteHost", "").split("@", maxsplit=1)[-1] or None
 +
-+    def convert_ad_to_doc(self, ad):
++    def convert_transfer_ad_to_docs(self, ad):
 +
 +        # Do the bulk of the conversions
-+        for doc in self.convert_ad_to_dict(ad):
++        for doc in self.convert_transfer_ad_to_dicts(ad):
 +
 +            # Add timestamps
 +            doc["@timestamp"] = doc["RecordTime"] = self.get_timestamp(ad)
@@ -771,7 +874,7 @@ index 0000000000..9d33465e43
 +
 +            yield doc
 diff --git a/src/condor_scripts/adstash/ad_sources/ad_file.py b/src/condor_scripts/adstash/ad_sources/ad_file.py
-index 44c98a199a..d1ef020f46 100644
+index 44c98a199a..af30f62600 100644
 --- a/src/condor_scripts/adstash/ad_sources/ad_file.py
 +++ b/src/condor_scripts/adstash/ad_sources/ad_file.py
 @@ -14,11 +14,13 @@
@@ -790,7 +893,13 @@ index 44c98a199a..d1ef020f46 100644
  
  
  class FileAdSource(GenericAdSource):
-@@ -53,18 +55,18 @@ class FileAdSource(GenericAdSource):
+@@ -48,23 +50,23 @@ class FileAdSource(GenericAdSource):
+         except IOError as e:
+             logging.error(f"Could not read {ad_file}: {str(e)}")
+             return
+-        except Exception:
++        except Exception as e:
+             logging.exception(f"Error while reading {ad_file} ({str(e)}), displaying traceback.")
              return
  
  
@@ -813,7 +922,7 @@ index 44c98a199a..d1ef020f46 100644
                  interface.post_ads(chunk, metadata=metadata, **kwargs)
                  yield
 diff --git a/src/condor_scripts/adstash/ad_sources/generic.py b/src/condor_scripts/adstash/ad_sources/generic.py
-index 0baeffe246..6e1c29a5d2 100644
+index 0baeffe246..1f3a80e3b9 100644
 --- a/src/condor_scripts/adstash/ad_sources/generic.py
 +++ b/src/condor_scripts/adstash/ad_sources/generic.py
 @@ -20,7 +20,8 @@ import traceback
@@ -826,18 +935,25 @@ index 0baeffe246..6e1c29a5d2 100644
  
  
  class GenericAdSource(object):
-@@ -57,7 +58,7 @@ class GenericAdSource(object):
+@@ -57,34 +58,28 @@ class GenericAdSource(object):
          return []
  
  
 -    def process_ads(self, interface, ads, chunk_size=0, **kwargs):
-+    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, chunk_size=0, **kwargs):
++    def process_ads(self, interface: GenericInterface, converter: GenericClassAdConverter, ads: list, metadata={}, chunk_size=0, **kwargs):
          chunk = []
          generic_checkpoint = None
-         checkpoint_reached = False
-@@ -71,14 +72,14 @@ class GenericAdSource(object):
-                 continue
- 
+-        checkpoint_reached = False
++        ads_posted = 0
+         for ad in ads:
+-            if checkpoint_reached:
+-                pass
+-            elif self.checkpoint["Generic"]["GlobalJobId"] == ad["GlobalJobId"]:
+-                checkpoint_reached = True
+-                continue
+-            else:
+-                continue
+-
              try:
 -                dict_ad = to_json(ad, return_dict=True)
 +                dict_ad = converter.convert_ad_to_doc(ad)
@@ -848,10 +964,24 @@ index 0baeffe246..6e1c29a5d2 100644
                  logging.warning(message)
                  continue
 -            chunk.append((unique_doc_id(dict_ad), dict_ad,))
++            if generic_checkpoint is None:  # set checkpoint from first parseable ad
++                generic_checkpoint = {"GlobalJobId": ad.get("GlobalJobId")}
 +            chunk.append((converter.get_unique_doc_id(dict_ad), dict_ad,))
              if (chunk_size > 0) and (len(chunk) >= chunk_size):
-                 interface.post_ads(chunk, **kwargs)
-                 generic_checkpoint = {"GlobalJobId": ad["GlobalJobId"]}
+-                interface.post_ads(chunk, **kwargs)
+-                generic_checkpoint = {"GlobalJobId": ad["GlobalJobId"]}
+-                yield generic_checkpoint
++                result = interface.post_ads(chunk, metadata=metadata, **kwargs)
++                ads_posted += result["success"]
++                yield None  # don't update checkpoint yet
+                 chunk = []
+         if len(chunk) > 0:
+-            interface.post_ads(chunk, **kwargs)
+-            generic_checkpoint = {"GlobalJobId": ad["GlobalJobId"]}
+-            yield generic_checkpoint
++            result = interface.post_ads(chunk, metadata=metadata, **kwargs)
++            ads_posted += result["success"]
++        yield generic_checkpoint
 diff --git a/src/condor_scripts/adstash/ad_sources/schedd_history.py b/src/condor_scripts/adstash/ad_sources/schedd_history.py
 index 7559692a28..94e5c1b06d 100644
 --- a/src/condor_scripts/adstash/ad_sources/schedd_history.py
@@ -935,7 +1065,7 @@ index 7e0ca49d74..473b7631dc 100644
              if (chunk_size > 0) and (len(chunk) >= chunk_size):
                  logging.debug(f"Posting {len(chunk)} job epoch ads from {schedd_ad['Name']}.")
 diff --git a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
-index 750aeff303..e9c463e1f9 100644
+index 750aeff303..511428286e 100644
 --- a/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
 +++ b/src/condor_scripts/adstash/ad_sources/schedd_transfer_epoch_history.py
 @@ -14,14 +14,12 @@
@@ -1055,7 +1185,7 @@ index 750aeff303..e9c463e1f9 100644
  
          history_kwargs = {}
          if max_ads > 0:
-@@ -141,216 +52,14 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+@@ -141,223 +52,12 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
          return schedd.jobEpochHistory(constraint=True, projection=[], ad_type="TRANSFER", **history_kwargs)
  
  
@@ -1268,21 +1398,51 @@ index 750aeff303..e9c463e1f9 100644
          schedd_checkpoint = None
          ads_posted = 0
          for ad in ads:
-             try:
+-            try:
 -                dict_ads = self.to_json_list(ad, return_dict=True)
-+                dict_ads = converter.convert_ad_to_doc(ad)
-             except Exception as e:
-                 message = f"Failure when converting document in {schedd_ad['name']} transfer epoch history: {str(e)}"
-                 exc = traceback.format_exc()
-@@ -371,7 +80,7 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+-            except Exception as e:
+-                message = f"Failure when converting document in {schedd_ad['name']} transfer epoch history: {str(e)}"
+-                exc = traceback.format_exc()
+-                message += f"\n{exc}"
+-                logging.warning(message)
+-                continue
+-
+             # Unfortunately, the schedd history is in reverse chronological order,
+             # therefore the checkpoint should be set to the first ad that is returned.
+             # Here, we assume that the interface is responsible for de-duping ads
+@@ -369,20 +69,27 @@ class ScheddTransferEpochHistorySource(GenericAdSource):
+                 for attr in ("EpochWriteDate", "ClusterId", "ProcId", "NumShadowStarts",):
+                     if attr in ad:
                          schedd_checkpoint[attr] = ad[attr]
-             for dict_ad in dict_ads:
-                 dict_ad["ScheddName"] = schedd_ad["name"]
+-            for dict_ad in dict_ads:
+-                dict_ad["ScheddName"] = schedd_ad["name"]
 -                chunk.append((self.unique_doc_id(dict_ad), dict_ad,))
-+                chunk.append((converter.get_unique_doc_id(dict_ad), dict_ad,))
++            try:
++                for dict_ad in converter.convert_transfer_ad_to_docs(ad):
++                    dict_ad["ScheddName"] = schedd_ad["Name"]
++                    chunk.append((converter.get_unique_doc_id(dict_ad), dict_ad,))
++            except Exception as e:
++                message = f"Failure when converting document in {schedd_ad['Name']} transfer epoch history: {str(e)}"
++                exc = traceback.format_exc()
++                message += f"\n{exc}"
++                logging.warning(message)
++                continue
  
              if (chunk_size > 0) and (len(chunk) >= chunk_size):
                  logging.debug(f"Posting {len(chunk)} transfer epoch ads from {schedd_ad['Name']}.")
+-                result = interface.post_ads(chunk, metadata=metadata, ad_source=self, **kwargs)
++                result = interface.post_ads(chunk, metadata=metadata, **kwargs)
+                 ads_posted += result["success"]
+                 yield None  # don't update checkpoint yet, per note above
+                 chunk = []
+ 
+         if len(chunk) > 0:
+             logging.debug(f"Posting {len(chunk)} transfer epoch ads from {schedd_ad['Name']}.")
+-            result = interface.post_ads(chunk, metadata=metadata, ad_source=self, **kwargs)
++            result = interface.post_ads(chunk, metadata=metadata, **kwargs)
+             ads_posted += result["success"]
+ 
+         endtime = time.time()
 diff --git a/src/condor_scripts/adstash/ad_sources/startd_history.py b/src/condor_scripts/adstash/ad_sources/startd_history.py
 index daf59529f9..ed506f979f 100644
 --- a/src/condor_scripts/adstash/ad_sources/startd_history.py
@@ -1725,7 +1885,7 @@ index f488547d6a..0000000000
 -    except Exception as e:
 -        logging.exception(f"Could not push transfer epoch ads from {schedd_ad['Name']}: {e.__class__.__name__}: {str(e)}")
 diff --git a/src/condor_scripts/adstash/config.py b/src/condor_scripts/adstash/config.py
-index 81492f4026..76dacf2724 100644
+index 81492f4026..e44a6a8653 100644
 --- a/src/condor_scripts/adstash/config.py
 +++ b/src/condor_scripts/adstash/config.py
 @@ -16,12 +16,14 @@
@@ -1743,8 +1903,12 @@ index 81492f4026..76dacf2724 100644
  
  from adstash.interfaces.registry import ADSTASH_INTERFACES
  
-@@ -55,6 +57,11 @@ def get_default_config(name="ADSTASH"):
-         "se_index_name": "htcondor-000001",
+@@ -52,9 +54,14 @@ def get_default_config(name="ADSTASH"):
+         "se_use_https": False,
+         "se_timeout": 2 * 60,
+         "se_bunch_size": 250,
+-        "se_index_name": "htcondor-000001",
++        "se_index_name": "htcondor",
          "se_log_mappings": True,
          "json_dir": Path.cwd(),
 +        "custom_field_properties": None,
@@ -1755,7 +1919,17 @@ index 81492f4026..76dacf2724 100644
      }
      return defaults
  
-@@ -95,6 +102,10 @@ def get_htcondor_config(name="ADSTASH"):
+@@ -71,7 +78,9 @@ def get_htcondor_config(name="ADSTASH"):
+         "threads": p.get(f"{name}_NUM_THREADS"),
+         "collectors": p.get(f"{name}_READ_POOLS"),
+         "schedds": p.get(f"{name}_READ_SCHEDDS"),
++        "ignore_schedds": p.get(f"{name}_IGNORE_SCHEDDS"),
+         "startds": p.get(f"{name}_READ_STARTDS"),
++        "ignore_startds": p.get(f"{name}_IGNORE_STARTDS"),
+         "read_schedd_history": p.get(f"{name}_SCHEDD_HISTORY"),
+         "read_startd_history": p.get(f"{name}_STARTD_HISTORY"),
+         "read_schedd_job_epoch_history": p.get(f"{name}_SCHEDD_JOB_EPOCH_HISTORY"),
+@@ -95,6 +104,10 @@ def get_htcondor_config(name="ADSTASH"):
          "se_ca_certs": p.get(f"{name}_ES_CA_CERTS", p.get(f"{name}_SE_CA_CERTS")),
          "se_log_mappings": p.get(f"{name}_SE_LOG_MAPPINGS"),
          "json_dir": p.get(f"{name}_JSON_DIR"),
@@ -1766,7 +1940,17 @@ index 81492f4026..76dacf2724 100644
      }
  
      # Convert debug level
-@@ -164,6 +175,10 @@ def get_environment_config(name="ADSTASH"):
+@@ -140,7 +153,9 @@ def get_environment_config(name="ADSTASH"):
+         "threads": env.get(f"{name}_NUM_THREADS"),
+         "collectors": env.get(f"{name}_READ_POOLS"),
+         "schedds": env.get(f"{name}_READ_SCHEDDS"),
++        "ignore_schedds": env.get(f"{name}_IGNORE_SCHEDDS"),
+         "startds": env.get(f"{name}_READ_STARTDS"),
++        "ignore_startds": env.get(f"{name}_IGNORE_STARTDS"),
+         "read_schedd_history": env.get(f"{name}_SCHEDD_HISTORY"),
+         "read_startd_history": env.get(f"{name}_STARTD_HISTORY"),
+         "read_schedd_job_epoch_history": env.get(f"{name}_SCHEDD_JOB_EPOCH_HISTORY"),
+@@ -164,6 +179,10 @@ def get_environment_config(name="ADSTASH"):
          "se_ca_certs": env.get(f"{name}_SE_CA_CERTS", env.get(f"{name}_CA_CERTS")),
          "se_log_mappings": env.get(f"{name}_SE_LOG_MAPPINGS"),
          "json_dir": env.get(f"{name}_JSON_DIR"),
@@ -1777,7 +1961,48 @@ index 81492f4026..76dacf2724 100644
      }
  
      # remove None values
-@@ -557,7 +572,7 @@ def get_config(argv=None):
+@@ -351,6 +370,12 @@ def get_config(argv=None):
+         metavar="LEVEL",
+         help="Log level (CRITICAL/ERROR/WARNING/INFO/DEBUG) [default: %(default)s]",
+     )
++    parser.add_argument(
++        "-q", "--quiet",
++        action="store_true",
++        default=False,
++        help="Don't print out log messages",
++    )
+     parser.add_argument(
+         "--threads",
+         type=int,
+@@ -439,6 +464,13 @@ def get_config(argv=None):
+             "[default is to process all Schedds located by Collectors]"
+         ),
+     )
++    history_group.add_argument(
++        "--ignore_schedds",
++        help=(
++            "Comma-separated list of Schedd names to skip processing "
++            "[default is to process all Schedds located by Collectors]"
++        ),
++    )
+     history_group.add_argument(
+         "--startds",
+         help=(
+@@ -446,6 +478,13 @@ def get_config(argv=None):
+             "[default is to process all Startds located by Collectors]"
+         ),
+     )
++    history_group.add_argument(
++        "--ignore_startds",
++        help=(
++            "Comma-separated list of Startd machines to skip processing "
++            "[default is to process all Startds located by Collectors]"
++        ),
++    )
+     history_group.add_argument(
+         "--schedd_history_max_ads",
+         type=int,
+@@ -557,7 +596,7 @@ def get_config(argv=None):
          "--se_no_log_mappings",
          dest="se_log_mappings",
          action="store_false",
@@ -1786,7 +2011,7 @@ index 81492f4026..76dacf2724 100644
      )
      se_group.add_argument(
          "--se_ca_certs", "--ca_certs",
-@@ -580,6 +595,67 @@ def get_config(argv=None):
+@@ -580,6 +619,73 @@ def get_config(argv=None):
          help="Directory to store JSON files, which are named by timestamp [defaults to current directory]",
      )
  
@@ -1827,6 +2052,12 @@ index 81492f4026..76dacf2724 100644
 +        help="Write out JSON files to set up a new index for your search engine then exit."
 +    )
 +    init_index_group.add_argument(
++        "--init_ad_type",
++        choices=["history", "job_epoch_history", "transfer_epoch_history"],
++        default="history",
++        help="Ad type to use for default mappings [default: %(default)s]",
++    )
++    init_index_group.add_argument(
 +        "--init_output_directory",
 +        type=Path,
 +        default=Path().cwd(),
@@ -1854,7 +2085,7 @@ index 81492f4026..76dacf2724 100644
      # Parse args and add process name back to the list
      args = parser.parse_args(remaining_argv)
      args_dict = vars(args)
-@@ -589,6 +665,22 @@ def get_config(argv=None):
+@@ -589,6 +695,22 @@ def get_config(argv=None):
          args.schedd_history_projection = set(re.split(r"[\s,]+", args.schedd_history_projection.strip()))
      if args.startd_history_projection:
          args.startd_history_projection = set(re.split(r"[\s,]+", args.startd_history_projection.strip()))
@@ -1877,7 +2108,7 @@ index 81492f4026..76dacf2724 100644
  
      # Check for deprecated args
      for arg in remaining_argv:
-@@ -601,4 +693,9 @@ def get_config(argv=None):
+@@ -601,4 +723,9 @@ def get_config(argv=None):
              logging.warning(f"Use of --json_local is deprecated, use --interface=jsonfile instead.")
              args.interface="jsonfile"
  
@@ -1889,10 +2120,10 @@ index 81492f4026..76dacf2724 100644
      return args
 diff --git a/src/condor_scripts/adstash/index_setup.py b/src/condor_scripts/adstash/index_setup.py
 new file mode 100644
-index 0000000000..5dfbe3a330
+index 0000000000..88339564ad
 --- /dev/null
 +++ b/src/condor_scripts/adstash/index_setup.py
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,202 @@
 +import logging
 +import json
 +
@@ -1904,7 +2135,7 @@ index 0000000000..5dfbe3a330
 +from adstash.interfaces.generic import GenericInterface
 +from adstash.mapping.functions import get_default_mapping_properties, merge_properties, merge_dynamic_templates
 +from adstash.mapping import job, job_epoch, transfer_epoch
-+from adstash.settings import SearchEngineSettings
++from adstash.settings import SearchEngineSettings, calculate_field_limit
 +
 +
 +AD_TYPE_DEFAULT_MAPPINGS = {
@@ -1936,7 +2167,7 @@ index 0000000000..5dfbe3a330
 +        logging.warning(report)
 +
 +
-+def set_index_mappings(
++def compute_index_mappings(
 +        interface: GenericInterface,
 +        index: str,
 +        ad_type: str,
@@ -1956,13 +2187,8 @@ index 0000000000..5dfbe3a330
 +    default_properties = get_default_mapping_properties(AD_TYPE_DEFAULT_MAPPINGS[ad_type])
 +    default_templates = AD_TYPE_DEFAULT_MAPPINGS[ad_type].DYNAMIC_TEMPLATES
 +
-+    mappings = existing_mappings.copy()
 +    mappings["properties"] = merge_properties(existing_properties, custom_properties, default_properties)
 +    mappings["dynamic_templates"] = merge_dynamic_templates(default_templates, custom_templates)
-+
-+    if interface.is_search_engine:
-+        logging.info(f"Pushing computed index mappings to {interface.__class__.__name__}")
-+        interface.update_mappings(index, mappings)
 +
 +    return mappings
 +
@@ -2024,22 +2250,74 @@ index 0000000000..5dfbe3a330
 +        logging.exception(f"Failed to write last mappings and/or settings to {log_dir}")
 +
 +
++def init_index(ad_type: str, args: Namespace) -> None:
++    """Write out JSON files for initializing a new search engine index."""
++    if ad_type not in AD_TYPE_DEFAULT_MAPPINGS:
++        raise ValueError(f"Unknown ad type '{ad_type}', choose from: {', '.join(AD_TYPE_DEFAULT_MAPPINGS)}")
++
++    interface = GenericInterface()
++
++    mappings = compute_index_mappings(
++        interface=interface,
++        index=args.se_index_name,
++        ad_type=ad_type,
++        custom_properties=args.custom_field_properties or {},
++        custom_templates=args.custom_dynamic_templates or OrderedDict(),
++    )
++
++    ses = SearchEngineSettings(
++        index_name=args.se_index_name,
++        mappings=mappings,
++        custom_settings=args.custom_index_settings or {},
++    )
++
++    print(f"Preparing index using default mappings for {ad_type} ads.")
++
++    ses.write_index_settings(
++        output_directory=args.init_output_directory,
++        use_alias=args.use_alias,
++        use_ilm=args.use_ilm,
++        use_template=args.use_template,
++    )
++
++
 +def setup_index(interface: GenericInterface, ad_type: str, args: Namespace) -> Tuple[dict]:
 +    test_interface(interface=interface)
 +    check_interface_health(interface=interface)
-+    mappings = set_index_mappings(
++    # Compute mappings
++    mappings = compute_index_mappings(
 +        interface=interface,
 +        index=args.se_index_name,
 +        ad_type=ad_type,
 +        custom_properties=args.custom_field_properties or {},
 +        custom_templates=args.custom_dynamic_templates or OrderedDict(),
 +        )
++    # Update settings (including total_fields.limit) before pushing mappings.
 +    settings = set_index_settings(
 +        interface=interface,
 +        index=args.se_index_name,
 +        mappings=mappings,
 +        custom_settings=args.custom_index_settings or {},
 +    )
++    # Now push updated mappings
++    if interface.is_search_engine:
++        logging.info(f"Pushing computed index mappings to {interface.__class__.__name__}")
++        try:
++            interface.update_mappings(args.se_index_name, mappings)
++        except Exception as e:
++            if "total fields" in str(e).lower() and "exceeded" in str(e).lower():
++                active_index = interface.get_active_index(args.se_index_name)
++                current_settings = interface.get_settings(active_index)
++                current_limit = int(current_settings["index"]["mapping"]["total_fields"]["limit"])
++                new_limit = max(calculate_field_limit(mappings), current_limit * 2)
++                logging.warning(
++                    f"Field limit exceeded pushing mappings (limit may have reset after rollover), "
++                    f"bumping to {new_limit} and retrying"
++                )
++                interface.update_settings(args.se_index_name, {"index.mapping.total_fields.limit": new_limit})
++                interface.update_mappings(args.se_index_name, mappings)
++            else:
++                raise
 +    if args.se_log_mappings:
 +        log_mappings(
 +            interface_name=args.interface,
@@ -2049,7 +2327,7 @@ index 0000000000..5dfbe3a330
 +        )
 +    return (mappings, settings,)
 diff --git a/src/condor_scripts/adstash/interfaces/elasticsearch.py b/src/condor_scripts/adstash/interfaces/elasticsearch.py
-index 988dc0c64f..368d74e087 100644
+index 988dc0c64f..8feef11554 100644
 --- a/src/condor_scripts/adstash/interfaces/elasticsearch.py
 +++ b/src/condor_scripts/adstash/interfaces/elasticsearch.py
 @@ -15,10 +15,8 @@
@@ -2063,14 +2341,16 @@ index 988dc0c64f..368d74e087 100644
  from operator import itemgetter
  from collections import defaultdict
  
-@@ -30,7 +28,6 @@ except ModuleNotFoundError as err:
+@@ -30,8 +28,7 @@ except ModuleNotFoundError as err:
      _ES_MODULE_FOUND = False
      _ES_MODULE_NOT_FOUND_ERROR = err
  
 -import adstash.convert as convert
- from adstash.utils import get_host_port
+-from adstash.utils import get_host_port
++from adstash.utils import get_host_port, classad_json_serializer
  from adstash.interfaces.generic import GenericInterface
  
+ ES8 = (8,0,0)
 @@ -41,6 +38,7 @@ if _ES_MODULE_FOUND and (ES_VERSION < (7,0,0) or ES_VERSION >= (9,0,0)):
  
  class ElasticsearchInterface(GenericInterface):
@@ -2125,8 +2405,7 @@ index 988dc0c64f..368d74e087 100644
 +
 +
 +    def get_health(self) -> dict:
-         client = self.get_handle()
--        indices = client.indices.get_alias(name=alias)
++        client = self.get_handle()
 +        health = {}
 +        try:
 +            health = client.cluster.health()
@@ -2138,7 +2417,8 @@ index 988dc0c64f..368d74e087 100644
 +
 +
 +    def get_active_index(self, alias: str) -> str:
-+        client = self.get_handle()
+         client = self.get_handle()
+-        indices = client.indices.get_alias(name=alias)
 +        try:
 +            indices = client.indices.get_alias(name=alias)
 +        except elasticsearch.exceptions.NotFoundError:
@@ -2147,7 +2427,7 @@ index 988dc0c64f..368d74e087 100644
  
          # find which index is reporting as writable
          for index, alias_info in indices.items():
-@@ -121,182 +153,79 @@ class ElasticsearchInterface(GenericInterface):
+@@ -121,189 +153,107 @@ class ElasticsearchInterface(GenericInterface):
          return indices[0]
  
  
@@ -2333,13 +2613,13 @@ index 988dc0c64f..368d74e087 100644
 -                mappings_file = log_dir / "condor_adstash_elasticsearch_last_mappings.json"
 -                logging.debug(f"Writing updated mappings to {mappings_file}.")
 -                json.dump(updated_mappings, open(mappings_file, "w"), indent=2)
--
 +        logging.info(f"Updating mappings for index {index}")
 +        logging.debug(json.dumps(mappings, indent=2))
 +        if ES_VERSION < ES8:
 +            client.indices.put_mapping(index=index, body=json.dumps(mappings))
 +        elif ES_VERSION >= ES8:
 +            client.indices.put_mapping(index=index, **mappings)
+ 
  
 -    def make_bulk_body(self, ads, metadata={}):
 -        body = ""
@@ -2349,14 +2629,12 @@ index 988dc0c64f..368d74e087 100644
 -            action = {"index": {"_id": doc_id}}
 -            body += f"{json.dumps(action)}\n{json.dumps(ad)}\n"
 -        return body
- 
 +    def update_settings(self, index: str, settings: dict, **kwargs):
 +        """
 +        Given an index and settings, push the new settings to the index
 +        """
 +        client = self.get_handle()
  
--    def get_error_info(self, result):
 +        logging.info(f"Updating settings for index {index}")
 +        logging.debug(json.dumps(settings, indent=2))
 +        if ES_VERSION < ES8:
@@ -2374,24 +2652,72 @@ index 988dc0c64f..368d74e087 100644
 +        """
 +        body = []
 +        for doc_id, doc in docs:
-+            doc["metadata"] = metadata  # bolt on the metadata
++            doc["metadata"] = {**doc.get("metadata", {}), **metadata}  # merge existing with chunk-level metadata
 +            action = {"index": {"_id": doc_id}}  # index the doc w/ this id
 +            body.append(json.dumps(action))
-+            body.append(json.dumps(doc, sort_keys=True))
++            body.append(json.dumps(doc, sort_keys=True, default=classad_json_serializer))
 +        return "\n".join(body)
 +
 +
-+    def get_error_count(self, result: dict) -> int:
++    def get_error_count(self, result: dict, n_ads: int = 0, raise_on_errors: bool = False) -> int:
 +        """
 +        Crawl through the result from the bulk API,
 +        print out any errors,
 +        and return the number of errors encountered.
 +        https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-bulk#operation-bulk-200
++
++        n_ads is the number of docs submitted; used as the error count when the
++        response is malformed (missing 'errors' key), since we cannot confirm any
++        docs were indexed successfully.
++
++        If raise_on_errors is True, raise RuntimeError instead of returning when
++        the response is malformed or when indexing errors are present.
 +        """
++        if "errors" not in result:
++            msg = f"Bulk response missing 'errors' key (possible timeout or partial response): {result}"
++            if raise_on_errors:
++                raise RuntimeError(msg)
++            logging.warning(msg)
++            return n_ads
+ 
+-    def get_error_info(self, result):
          if not result["errors"]:
              return 0
  
-@@ -334,11 +263,15 @@ class ElasticsearchInterface(GenericInterface):
++        took = result.get("took")
++        items = result.get("items", [])
++        n_success = sum(1 for item in items if item.get("index", {}).get("status", 0) < 300)
++
++        if n_success == 0 and not items:
++            logging.error(f"Bulk response has errors=true but no items; raw result: {result}")
++
+         n_errors = 0
+         error_types = defaultdict(int)
+         error_reasons = []
+-        for item in result["items"]:
++        for item in items:
+             try:
+                 error = item["index"]["error"]
+                 n_errors += 1
+@@ -324,21 +274,34 @@ class ElasticsearchInterface(GenericInterface):
+         error_type_strs = []
+         for (error_type, n) in error_type_list[:3]:
+             error_type_strs.append(f"{error_type} ({n} times)")
+-        logging.error(f"{n_errors} errors encountered during bulk index.")
++        took_str = f", took {took}ms on ES side" if took is not None else ""
++        logging.error(f"{n_errors} errors encountered during bulk index ({n_success} succeeded{took_str}).")
+         logging.error(f"""Most common error type(s): {", ".join(error_type_strs)}.""")
+         try:
+             logging.error(f"""Example reason: {random.choice(error_reasons)}.""")
+         except IndexError:
+             pass
+ 
++        if raise_on_errors:
++            raise RuntimeError(
++                f"{n_errors} errors in bulk index ({n_success} succeeded{took_str}); "
++                f"most common type(s): {', '.join(error_type_strs)}"
++            )
++
          return n_errors
  
  
@@ -2406,10 +2732,13 @@ index 988dc0c64f..368d74e087 100644
  
 -        self.setup_index(index, **kwargs)
          body = self.make_bulk_body(ads, metadata)
-         result = client.bulk(body=body, index=index)
+-        result = client.bulk(body=body, index=index)
 -        n_errors = self.get_error_info(result)
-+        n_errors = self.get_error_count(result)
++        result = client.bulk(body=body, index=index, filter_path=["errors", "took", "items.*.index.error.**", "items.*.index.status"])
++        n_errors = self.get_error_count(result, n_ads=len(ads), **kwargs)
          return {"success": len(ads)-n_errors, "error": n_errors}
++
++
 diff --git a/src/condor_scripts/adstash/interfaces/generic.py b/src/condor_scripts/adstash/interfaces/generic.py
 index 2f4b80726e..3df5b9ce5f 100644
 --- a/src/condor_scripts/adstash/interfaces/generic.py
@@ -2477,10 +2806,10 @@ index 2f4b80726e..3df5b9ce5f 100644
 +            n += 1
 +        return {"success": n, "error": 0}
 diff --git a/src/condor_scripts/adstash/interfaces/json_file.py b/src/condor_scripts/adstash/interfaces/json_file.py
-index ce7e0fa431..071547c775 100644
+index ce7e0fa431..15fc9a8da0 100644
 --- a/src/condor_scripts/adstash/interfaces/json_file.py
 +++ b/src/condor_scripts/adstash/interfaces/json_file.py
-@@ -15,174 +15,39 @@
+@@ -15,174 +15,40 @@
  
  import time
  import json
@@ -2490,6 +2819,7 @@ index ce7e0fa431..071547c775 100644
  
 -from adstash.interfaces.null import NullInterface
 -import adstash.convert as convert
++from adstash.utils import classad_json_serializer
 +from adstash.interfaces.generic import GenericInterface
  
 -class JSONFileInterface(NullInterface):
@@ -2640,7 +2970,7 @@ index ce7e0fa431..071547c775 100644
 +            body.append(doc)
  
 +        if self.json_legacy:
-+            return "".join([json.dumps(doc, indent=2, sort_keys=True) for doc in body])
++            return "".join([json.dumps(doc, indent=2, sort_keys=True, default=classad_json_serializer) for doc in body])
  
 -    # Not great that this is copied from ElasticsearchInterface, but
 -    # this prevents needing to load the elasticsearch library to use
@@ -2655,7 +2985,7 @@ index ce7e0fa431..071547c775 100644
 -            "mapping.total_fields.limit": 5000,
 -        }
 -        return settings
-+        return json.dumps(body, indent=2, sort_keys=True)
++        return json.dumps(body, indent=2, sort_keys=True, default=classad_json_serializer)
  
  
      def post_ads(self, ads, metadata={}, **kwargs):
@@ -2709,7 +3039,7 @@ index 6d3bb0e239..0000000000
 -            n += 1
 -        return {"success": n, "error": 0}
 diff --git a/src/condor_scripts/adstash/interfaces/opensearch.py b/src/condor_scripts/adstash/interfaces/opensearch.py
-index d1048f7f45..0142e890dc 100644
+index d1048f7f45..418f163768 100644
 --- a/src/condor_scripts/adstash/interfaces/opensearch.py
 +++ b/src/condor_scripts/adstash/interfaces/opensearch.py
 @@ -13,11 +13,8 @@
@@ -2780,7 +3110,7 @@ index d1048f7f45..0142e890dc 100644
          if self.handle is not None:
              return self.handle
  
-@@ -94,56 +83,20 @@ class OpenSearchInterface(ElasticsearchInterface):
+@@ -94,56 +83,16 @@ class OpenSearchInterface(ElasticsearchInterface):
          return self.handle
  
  
@@ -2848,10 +3178,6 @@ index d1048f7f45..0142e890dc 100644
 +            client.indices.put_mapping(index=index, body=body)
 +        else:
 +            client.indices.put_mapping(index=index, **mappings)
-+        if self.log_mappings and self.log_dir:
-+            mappings_file = self.log_dir / "condor_adstash_opensearch_last_mappings.json"
-+            logging.debug(f"Writing updated mappings to {mappings_file}.")
-+            json.dump(mappings, open(mappings_file, "w"), indent=2)
 diff --git a/src/condor_scripts/adstash/interfaces/registry.py b/src/condor_scripts/adstash/interfaces/registry.py
 index 7b282c9c12..6fa06c3736 100644
 --- a/src/condor_scripts/adstash/interfaces/registry.py
@@ -2883,10 +3209,10 @@ index 7b282c9c12..6fa06c3736 100644
  ADSTASH_INTERFACES = list(ADSTASH_INTERFACE_REGISTRY.keys())
 diff --git a/src/condor_scripts/adstash/main.py b/src/condor_scripts/adstash/main.py
 new file mode 100644
-index 0000000000..7973d00295
+index 0000000000..bde4074fd2
 --- /dev/null
 +++ b/src/condor_scripts/adstash/main.py
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,230 @@
 +# Copyright 2022 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -3052,18 +3378,33 @@ index 0000000000..7973d00295
 +                    ckpt_updater.start()
 +
 +                    # Report processes if they timeout or error
++                    timeout = vars(args)[f"{daemon_type}_history_timeout"]
++                    succeeded = 0
++                    timed_out = []
++                    errored = []
 +                    for daemon_name, future in futures:
 +                        try:
-+                            logging.warning(f"Waiting for {daemon_type.capitalize()} {daemon_name} to finish.")
-+                            future.get(vars(args)[f"{daemon_type}_history_timeout"])
++                            if not future.ready():
++                                logging.warning(f"Waiting for {daemon_type.capitalize()} {daemon_name} to finish (timeout: {timeout}s).")
++                            future.get(timeout)
++                            succeeded += 1
 +                        except multiprocessing.TimeoutError:
 +                            logging.warning(f"Waited too long for {daemon_type.capitalize()} {daemon_name}; it may still complete in the background.")
++                            timed_out.append(daemon_name)
 +                        except Exception:
 +                            logging.exception(f"Error getting progress from {daemon_type.capitalize()} {daemon_name}.")
++                            errored.append(daemon_name)
++                    total = len(futures)
++                    summary = f"{succeeded}/{total} {daemon_type}s completed"
++                    if timed_out:
++                        summary += f", {len(timed_out)} timed out: {', '.join(timed_out)}"
++                    if errored:
++                        summary += f", {len(errored)} errored: {', '.join(errored)}"
++                    logging.warning(summary)
 +
 +                    checkpoint_queue.put(None)
 +                    logging.warning(f"Joining the {daemon_type} checkpoint queue.")
-+                    ckpt_updater.join(timeout=(len(daemon_ads) * args.schedd_history_timeout))
++                    ckpt_updater.join(timeout=(len(daemon_ads) * vars(args)[f"{daemon_type}_history_timeout"]))
 +                    logging.warning(f"Shutting down the {daemon_type} checkpoint queue.")
 +                    ckpt_updater.terminate()
 +                    manager.shutdown()
@@ -3107,7 +3448,7 @@ new file mode 100644
 index 0000000000..e69de29bb2
 diff --git a/src/condor_scripts/adstash/mapping/common.py b/src/condor_scripts/adstash/mapping/common.py
 new file mode 100644
-index 0000000000..a51193ffb3
+index 0000000000..01d4392a34
 --- /dev/null
 +++ b/src/condor_scripts/adstash/mapping/common.py
 @@ -0,0 +1,42 @@
@@ -3136,11 +3477,11 @@ index 0000000000..a51193ffb3
 +        "properties": {
 +            "condor_adstash_hostname": {"type": "keyword"},
 +            "condor_adstash_username": {"type": "keyword"},
-+            "condor_adstash_runtime": {"type": "date", "format": "epoch_second"},
++            "condor_adstash_runtime": {"type": "date", "format": "epoch_second||strict_date_optional_time"},
 +            "condor_adstash_version": {"type": "keyword"},
 +            "condor_adstash_platform": {"type": "keyword"},
 +            "condor_adstash_source": {"type": "keyword"},
-+            "condor_history_runtime": {"type": "date", "format": "epoch_second"},
++            "condor_history_runtime": {"type": "date", "format": "epoch_second||strict_date_optional_time"},
 +            "condor_history_host_platform": {"type": "keyword"},
 +            "condor_history_host_version": {"type": "keyword"},
 +            "condor_history_host_name": {"type": "keyword"},
@@ -3155,10 +3496,10 @@ index 0000000000..a51193ffb3
 +}
 diff --git a/src/condor_scripts/adstash/mapping/functions.py b/src/condor_scripts/adstash/mapping/functions.py
 new file mode 100644
-index 0000000000..2fded9533e
+index 0000000000..3c1f85824e
 --- /dev/null
 +++ b/src/condor_scripts/adstash/mapping/functions.py
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,177 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -3192,7 +3533,8 @@ index 0000000000..2fded9533e
 +    for k, v in properties.items():
 +        if parent:
 +            k = f"{parent}.{k}"
-+        if "properties" in v:  # object containing other properties
++        if "properties" in v and v.get("type") != "nested":  # object containing other properties
++            v = v.copy()  # avoid mutating the original mapping
 +            flattened_properties.update(flatten_mapping_properties(v.pop("properties"), k))
 +            if not "type" in v:  # make sure objects are explicitly defined
 +                v["type"] = "object"
@@ -3231,6 +3573,8 @@ index 0000000000..2fded9533e
 +            # If the fields have the same type, merge additional properties
 +            if new_field_type == existing_field_type:
 +                for key, value in mapping.items():
++                    if key == "format" and "format" in properties_out[field]:
++                        continue  # format is immutable on existing fields
 +                    properties_out[field][key] = value
 +                continue
 +
@@ -3317,7 +3661,7 @@ index 0000000000..2fded9533e
 +            [(field, {"type": "keyword", "index": "false", "ignore_above": ad_type.MAX_KEYWORD_LEN}) for field in ad_type.NON_INDEXED_KEYWORD_ATTRS] +
 +            [(field, {"type": "double"}) for field in ad_type.FLOAT_ATTRS] +
 +            [(field, {"type": "long"}) for field in ad_type.INT_ATTRS] +
-+            [(field, {"type": "date", "format": "epoch_second"}) for field in ad_type.DATE_ATTRS] +
++            [(field, {"type": "date", "format": "epoch_second||strict_date_optional_time"}) for field in ad_type.DATE_ATTRS] +
 +            [(field, {"type": "boolean"}) for field in ad_type.BOOL_ATTRS] +
 +            [(field, {"type": "object", "dynamic": True}) for field in ad_type.OBJECT_ATTRS] +
 +            [(field, {"type": "nested", "dynamic": True}) for field in ad_type.NESTED_ATTRS]
@@ -3334,10 +3678,10 @@ index 0000000000..2fded9533e
 +    }
 +    return mappings
 diff --git a/src/condor_scripts/adstash/convert.py b/src/condor_scripts/adstash/mapping/job.py
-similarity index 52%
+similarity index 51%
 rename from src/condor_scripts/adstash/convert.py
 rename to src/condor_scripts/adstash/mapping/job.py
-index b1922a08ea..9566b58332 100644
+index b1922a08ea..1f8956d08d 100644
 --- a/src/condor_scripts/adstash/convert.py
 +++ b/src/condor_scripts/adstash/mapping/job.py
 @@ -1,4 +1,4 @@
@@ -3346,7 +3690,7 @@ index b1922a08ea..9566b58332 100644
  # University of Wisconsin-Madison, WI.
  #
  # Licensed under the Apache License, Version 2.0 (the "License");
-@@ -13,160 +13,159 @@
+@@ -13,160 +13,163 @@
  # See the License for the specific language governing permissions and
  # limitations under the License.
  
@@ -3417,6 +3761,7 @@ index b1922a08ea..9566b58332 100644
      "BatchQueue",
      "CloudLabelNames",
 +    "Cmd",
++    "CommonInputFiles",
 +    "CompressFiles",
      "ConcurrencyLimits",
      "CondorPlatform",
@@ -3424,6 +3769,7 @@ index b1922a08ea..9566b58332 100644
 +    "ContainerImage",
 +    "ContainerImageSource",
 +    "ContainerServiceNames",
++    "ContainerTargetDir",
 +    "CronDayOfMonth",
 +    "CronDayOfWeek",
 +    "CronHour",
@@ -3560,6 +3906,7 @@ index b1922a08ea..9566b58332 100644
 +    "OsUser",
      "Out",
      "OutputDestination",
++    "OutputDirectory",
 +    "Owner",
      "PeriodicHoldReason",
      "PeriodicReleaseReason",
@@ -3596,6 +3943,7 @@ index b1922a08ea..9566b58332 100644
 -    "SubmitEventNotes",
 -    "SubmitEventUserNotes",
 +    "Status",
++    "SubmitVersion",
 +    "SubmitterGlobalJobId",
 +    "SubmitterGroup",
 +    "SubmitterNegotiatingGroup",
@@ -3604,7 +3952,7 @@ index b1922a08ea..9566b58332 100644
      "TransferCheckpoint",
      "TransferInput",
      "TransferInputRemaps",
-@@ -174,37 +173,58 @@ NOINDEX_KEYWORD_ATTRS = {
+@@ -174,37 +177,58 @@ NOINDEX_KEYWORD_ATTRS = {
      "TransferOutput",
      "TransferOutputRemaps",
      "TransferPlugins",
@@ -3663,7 +4011,7 @@ index b1922a08ea..9566b58332 100644
      "CpusProvisioned",
      "CumulativeRemoteSysCpu",
      "CumulativeRemoteUserCpu",
-@@ -212,9 +232,32 @@ INT_ATTRS = {
+@@ -212,9 +236,32 @@ INT_ATTRS = {
      "CumulativeSuspensionTime",
      "CumulativeTransferTime",
      "CurrentHosts",
@@ -3697,7 +4045,7 @@ index b1922a08ea..9566b58332 100644
      "DiskProvisioned",
      "DiskUsage_RAW",
      "DiskUsage",
-@@ -224,40 +267,51 @@ INT_ATTRS = {
+@@ -224,40 +271,51 @@ INT_ATTRS = {
      "ExitCode",
      "ExitSignal",
      "ExitStatus",
@@ -3756,7 +4104,7 @@ index b1922a08ea..9566b58332 100644
      "MaxTransferInputMB",
      "MaxTransferOutputMB",
      "MaxWallTimeMins_RAW",
-@@ -270,18 +324,25 @@ INT_ATTRS = {
+@@ -270,18 +328,25 @@ INT_ATTRS = {
      "NoopJobExitSignal",
      "NumCkpts_RAW",
      "NumCkpts",
@@ -3782,7 +4130,7 @@ index b1922a08ea..9566b58332 100644
      "PeriodicHoldSubCode",
      "PilotRestLifeTimeMins",
      "PostCmdExitCode",
-@@ -293,12 +354,18 @@ INT_ATTRS = {
+@@ -293,12 +358,18 @@ INT_ATTRS = {
      "PreJobPrio1",
      "PreJobPrio2",
      "ProcId",
@@ -3801,15 +4149,18 @@ index b1922a08ea..9566b58332 100644
      "RemoteSlotID",
      "RemoteSysCpu",
      "RemoteUserCpu",
-@@ -312,6 +379,7 @@ INT_ATTRS = {
+@@ -310,8 +381,10 @@ INT_ATTRS = {
+     "RequestVirtualMemory",
+     "ResidentSetSize_RAW",
      "ResidentSetSize",
++    "ScheddInterval",
      "ScratchDirFileCount",
      "StackSize",
 +    "StatsLifetime",
      "StatsLifetimeStarter",
      "SuccessCheckpointExitCode",
      "SuccessCheckpointExitSignal",
-@@ -319,20 +387,28 @@ INT_ATTRS = {
+@@ -319,20 +392,28 @@ INT_ATTRS = {
      "SuccessPostExitSignal",
      "SuccessPreExitCode",
      "SuccessPreExitSignal",
@@ -3840,7 +4191,7 @@ index b1922a08ea..9566b58332 100644
      "JobCurrentFinishTransferInputDate",
      "JobCurrentFinishTransferOutputDate",
      "JobCurrentStartDate",
-@@ -341,8 +417,10 @@ DATE_ATTRS = {
+@@ -341,8 +422,10 @@ DATE_ATTRS = {
      "JobCurrentStartTransferOutputDate",
      "JobDisconnectedDate",
      "JobFinishedHookDone",
@@ -3851,7 +4202,7 @@ index b1922a08ea..9566b58332 100644
      "JobQueueBirthdate",
      "JobStartDate",
      "LastJobLeaseRenewal",
-@@ -352,15 +430,19 @@ DATE_ATTRS = {
+@@ -352,15 +435,19 @@ DATE_ATTRS = {
      "LastSuspensionTime",
      "LastVacateTime_RAW",
      "LastVacateTime",
@@ -3873,9 +4224,11 @@ index b1922a08ea..9566b58332 100644
      "TransferInFinished",
      "TransferInQueued",
      "TransferInStarted",
-@@ -372,14 +454,22 @@ DATE_ATTRS = {
+@@ -371,15 +458,24 @@ DATE_ATTRS = {
+ 
  BOOL_ATTRS = {
      "BufferFiles",
++    "ContainerIsCommon",
      "CurrentStatusUnknown",
 +    "DAG_InRecovery",
 +    "DAGLifetimeJob",
@@ -3896,7 +4249,7 @@ index b1922a08ea..9566b58332 100644
      "LeaveJobInQueue",
      "LoadProfile",
      "ManifestDesired",
-@@ -387,13 +477,17 @@ BOOL_ATTRS = {
+@@ -387,13 +483,17 @@ BOOL_ATTRS = {
      "Nonessential",
      "OnExitHold",
      "OnExitRemove",
@@ -3914,7 +4267,7 @@ index b1922a08ea..9566b58332 100644
      "RunAsOwner",
      "SendCredential",
      "SkipIfDataflow",
-@@ -405,6 +499,7 @@ BOOL_ATTRS = {
+@@ -405,6 +505,7 @@ BOOL_ATTRS = {
      "SuccessPostExitBySignal",
      "SuccessPreExitBySignal",
      "TerminationPending",
@@ -3922,7 +4275,7 @@ index b1922a08ea..9566b58332 100644
      "TransferErr",
      "TransferExecutable",
      "TransferIn",
-@@ -414,16 +509,21 @@ BOOL_ATTRS = {
+@@ -414,16 +515,21 @@ BOOL_ATTRS = {
      "TransferringOutput",
      "Use_x509UserProxy",
      "UserLogUseXML",
@@ -3944,7 +4297,7 @@ index b1922a08ea..9566b58332 100644
      "WantMatchDiagnostics",
      "WantMatching",
      "WantParallelScheduling",
-@@ -433,22 +533,47 @@ BOOL_ATTRS = {
+@@ -433,22 +539,47 @@ BOOL_ATTRS = {
      "WantRemoteSyscalls",
      "WantRemoteUpdates",
      "WantResAd",
@@ -3993,7 +4346,15 @@ index b1922a08ea..9566b58332 100644
      "EC2AccessKeyId",
      "EC2KeyPair",
      "EC2KeyPairFile",
-@@ -473,6 +598,8 @@ IGNORE_ATTRS = {
+@@ -460,7 +591,6 @@ IGNORE_ATTRS = {
+     "Env",
+     "EnvDelim",
+     "Environment",
+-    "ExecutableSize",
+     "GceAccount",
+     "GceAuthFile",
+     "GceJsonFile",
+@@ -473,6 +603,8 @@ IGNORE_ATTRS = {
      "KeystoreFile",
      "KeystorePassphraseFile",
      "LastPublicClaimId",
@@ -4002,7 +4363,7 @@ index b1922a08ea..9566b58332 100644
      "PostArgs",
      "PostArguments",
      "PostEnv",
-@@ -482,244 +609,67 @@ IGNORE_ATTRS = {
+@@ -482,244 +614,67 @@ IGNORE_ATTRS = {
      "PreEnv",
      "PreEnvironment",
      "PublicClaimId",
@@ -4271,7 +4632,7 @@ index b1922a08ea..9566b58332 100644
 +    }},
 +    {"date_attrs": {  # Attrs ending in "Date" are usually timestamps
 +        "match": r"*Date",
-+        "mapping": {"type": "date", "format": "epoch_second"},
++        "mapping": {"type": "date", "format": "epoch_second||strict_date_optional_time"},
 +    }},
 +    {"provisioned_attrs": {  # Attrs ending in "Provisioned" are
 +        "match": r"*Provisioned",  # resource numbers
@@ -4284,12 +4645,12 @@ index b1922a08ea..9566b58332 100644
 +    }},
 +    {"stats_attrs": {  # Attrs ending with Stats are usually
 +        "match_pattern": "regex",  # ClassAds containing floating point numbers
-+        "match": r".*Stats\..*",
++        "match": r".+Stats\..+",
 +        "mapping": {"type": "double"},
 +    }},
 +    {"counts_attrs": {  # Attrs ending with Counts are usually
 +        "match_pattern": "regex",  # ClassAds containing numbers
-+        "match": r".*Counts\..*",
++        "match": r".+Counts\..+",
 +        "mapping": {"type": "long"},
 +    }},
 +    {"resource_request_attrs": {  # Attrs starting with "Request" are
@@ -4299,7 +4660,7 @@ index b1922a08ea..9566b58332 100644
 +    }},
 +    {"target_bool_attrs": {  # Attrs starting with "Want", "Has", or
 +        "match_pattern": "regex",  # "Is" are usually boolean checks
-+        "match": r"^(Want|Has|Is)[A-Z_].*$",
++        "match": r"(?i)^(Want|Has|Is).+$",
 +        "mapping": {"type": "boolean"},
 +    }},
 +    {"DEFAULT": {  # DEFAULT MAPPING - will be evaluated last
@@ -4367,10 +4728,10 @@ index 0000000000..c046f5c75e
 +DATE_ATTRS.add("EpochWriteDate")
 diff --git a/src/condor_scripts/adstash/mapping/transfer_epoch.py b/src/condor_scripts/adstash/mapping/transfer_epoch.py
 new file mode 100644
-index 0000000000..d5ddb1c944
+index 0000000000..26eaf4f997
 --- /dev/null
 +++ b/src/condor_scripts/adstash/mapping/transfer_epoch.py
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,137 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -4395,6 +4756,7 @@ index 0000000000..d5ddb1c944
 +    "AttemptError",
 +    "ErrorString",
 +    "TransferError",
++    "TransferError1",
 +}
 +
 +INDEXED_KEYWORD_ATTRS = {
@@ -4402,6 +4764,7 @@ index 0000000000..d5ddb1c944
 +    "ErrorType",
 +    "ErrorMessage",
 +    "FailedName",
++    "FailedServer",
 +    "FailureType",
 +    "DebugErrorType",
 +    "GLIDEIN_ResourceName",
@@ -4412,6 +4775,8 @@ index 0000000000..d5ddb1c944
 +    "Owner",
 +    "PelicanClientVersion",
 +    "ProjectName",
++    "PluginVersion",
++    "RemoteHost",
 +    "ScheddName",
 +    "ServerVersion",
 +    "StartdName",
@@ -4440,6 +4805,7 @@ index 0000000000..d5ddb1c944
 +    "Attempts",
 +    "AttemptFileBytes",
 +    "ClusterId",
++    "DataAge",
 +    "ErrorCode",
 +    "LibcurlReturnCode",
 +    "NumShadowStarts",
@@ -4450,10 +4816,10 @@ index 0000000000..d5ddb1c944
 +    "TransferHttpStatusCode",
 +    "TransferTotalBytes",
 +    "TransferTries",
-+    "DataAge",
 +}
 +
 +DATE_ATTRS = {
++    "@timestamp",
 +    "AttemptEndTime",
 +    "EpochWriteDate",
 +    "RecordTime",
@@ -4462,18 +4828,26 @@ index 0000000000..d5ddb1c944
 +}
 +
 +BOOL_ATTRS = {
++    "CacheHit",
 +    "FinalAttempt",
++    "IsRetryable",
++    "IsRetryable1",
++    "NoPluginResults",
++    "PluginLaunched",
 +    "Retryable",
 +    "TransferSuccess",
 +}
 +
 +OBJECT_ATTRS = {
 +    "ClientChecksums",
++    "ServerChecksums",
++    "DirectorDecision",
 +}
 +
 +NESTED_ATTRS = {
 +    "InputPluginInvocations",
 +    "OutputPluginInvocations",
++    "CheckpointPluginInvocations",
 +}
 +
 +DYNAMIC_TEMPLATES = [
@@ -4483,17 +4857,12 @@ index 0000000000..d5ddb1c944
 +    }},
 +    {"date_attrs": {  # Attrs ending in "Date" are usually timestamps
 +        "match": r"*Date",
-+        "mapping": {"type": "date", "format": "epoch_second"},
++        "mapping": {"type": "date", "format": "epoch_second||strict_date_optional_time"},
 +    }},
 +    {"target_bool_attrs": {  # Attrs starting with "Want", "Has", or
 +        "match_pattern": "regex",  # "Is" are usually boolean checks
-+        "match": r"^(Want|Has|Is)[A-Z_].*$",
++        "match": r"(?i)^(Want|Has|Is).+$",
 +        "mapping": {"type": "boolean"},
-+    }},
-+    {"plugin_invocations": {
-+        "match_pattern": "regex",
-+        "match": r"(In|Out)putPluginInvocations\.*$",
-+        "mapping": {"type": "object", "dynamic": True},
 +    }},
 +    {"DEFAULT": {  # DEFAULT MAPPING - will be evaluated last
 +        "match_mapping_type": "string",  # Store unknown attrs as indexed keywords
@@ -4502,10 +4871,10 @@ index 0000000000..d5ddb1c944
 +]
 diff --git a/src/condor_scripts/adstash/settings.py b/src/condor_scripts/adstash/settings.py
 new file mode 100644
-index 0000000000..2e51a5454e
+index 0000000000..bb16c45f36
 --- /dev/null
 +++ b/src/condor_scripts/adstash/settings.py
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,218 @@
 +# Copyright 2025 HTCondor Team, Computer Sciences Department,
 +# University of Wisconsin-Madison, WI.
 +#
@@ -4523,6 +4892,7 @@ index 0000000000..2e51a5454e
 +
 +import logging
 +import json
++import sys
 +
 +from pathlib import Path
 +
@@ -4533,7 +4903,10 @@ index 0000000000..2e51a5454e
 +        "mapping": {
 +            "ignore_malformed": True,  # https://www.elastic.co/guide/en/elasticsearch/reference/7.17/ignore-malformed.html#ignore-malformed-setting
 +        },
-+        "refresh_interval": "30s",  # https://www.elastic.co/guide/en/elasticsearch/reference/7.17/tune-for-indexing-speed.html#_unset_or_increase_the_refresh_interval
++        "refresh_interval": "60s",  # https://www.elastic.co/guide/en/elasticsearch/reference/7.17/tune-for-indexing-speed.html#_unset_or_increase_the_refresh_interval
++        "write": {
++            "wait_for_active_shards": "all",  # block writes unless all shard copies are available
++        },
 +    }
 +}
 +
@@ -4553,15 +4926,18 @@ index 0000000000..2e51a5454e
 +                }
 +            },
 +            "warm": {
-+                "min_age": "100d",  # rollover approx. quarterly
++                "min_age": "120d",  # approx. one quarter after first doc ingestion
 +                "actions": {
 +                    "forcemerge": {
 +                        "max_num_segments": 1  # merge down to single segment
++                    },
++                    "set_priority": {
++                        "priority": 50
 +                    }
 +                }
 +            },
 +            "cold": {
-+                "min_age": "400d",  # rollover after approx. year
++                "min_age": "400d",  # approx. one year after first doc ingestion (extra buffer for annual reporting)
 +                "actions": {
 +                    "set_priority": {
 +                        "priority": 0
@@ -4571,6 +4947,11 @@ index 0000000000..2e51a5454e
 +        }
 +    }
 +}
++
++
++def calculate_field_limit(mappings, previous_limit=0):
++    """Return the total_fields.limit to use for the given mappings (2x field count, at least previous_limit)."""
++    return max(2 * count_total_fields(mappings), int(previous_limit))
 +
 +
 +class SearchEngineSettings():
@@ -4623,7 +5004,7 @@ index 0000000000..2e51a5454e
 +    # this the field limit needs to be upped occasionally.
 +    def _calculate_update_settings_fields_limit(self):
 +        previous_limit = int(self.settings.get("index.mapping.total_fields.limit", 0))
-+        self.update_settings["index.mapping.total_fields.limit"] = max(2 * count_total_fields(self.mappings), previous_limit)
++        self.update_settings["index.mapping.total_fields.limit"] = calculate_field_limit(self.mappings, previous_limit)
 +        # Using limit = 5000 as an arbitrary point to start warning about performance degredation
 +        if self.update_settings["index.mapping.total_fields.limit"] > 5000 and self.update_settings["index.mapping.total_fields.limit"] > previous_limit:
 +            logging.warning(f"Large index.mapping.total_fields.limit: {self.update_settings['index.mapping.total_fields.limit']}")
@@ -4638,73 +5019,200 @@ index 0000000000..2e51a5454e
 +        ilm_policy_name = f"{self.alias}-ilm"
 +        if use_ilm:
 +            if not use_alias:
-+                raise RuntimeError("Use of ILM requires using aliases for rollover")
++                print("ERROR: Use of ILM requires using aliases for rollover.", file=sys.stderr)
++                return
 +            if not use_template:
-+                logging.warning(f"Recommend use of index templates when using ILM to preserve")
-+                logging.warning(f"setttings and mappings after rollovers.")
++                print("WARNING: Recommend use of index templates when using ILM to preserve")
++                print("  settings and mappings after rollovers.")
 +            self.settings["index.lifecycle.name"] = ilm_policy_name
 +            self.settings["index.lifecycle.rollover_alias"] = self.alias
 +            files["ilm"] = {"name": f"{ilm_policy_name}.json", "contents": DEFAULT_ILM_POLICY}
 +
 +        if use_template:
 +            if not use_alias:
-+                logging.warning(f"Recommend use of aliases when using index templates.")
-+                logging.warning(f"Assuming that the index match pattern is {self.alias}-*.")
++                print("WARNING: Recommend use of aliases when using index templates.")
++                print(f"  Assuming that the index match pattern is {self.alias}-*.")
 +            template = self.get_index_template()
 +            files["template"] = {"name": f"{self.alias}-template.json", "contents": template}
 +        else:
 +            index = self.index_definition
 +
 +        if use_alias:
-+            if self.alias[-1] in [str(x) for x in range(10)]:
-+                logging.warning(f"Alias {self.alias} ends with a number, which is not recommended")
++            if self.alias[-1].isdigit():
++                print(f"WARNING: Alias {self.alias} ends with a number, which is not recommended")
 +                if "-0" in self.alias:
-+                    logging.warning(f"Consider using: --se_index_name={'-'.join(self.alias.split('-')[:-1])}")
++                    print(f"  Consider using: --se_index_name={'-'.join(self.alias.split('-')[:-1])}")
 +            index["aliases"] = {self.alias: {"is_write_index": True}}
 +            index_name = f"{self.alias}-000001"
-+            logging.warning(f"The initial index will be named {index_name}")
++            print(f"The initial index will be named {index_name}")
 +        else:
 +            index_name = self.alias
 +        files["index"] = {"name": f"{index_name}.json", "contents": index}
 +
-+        logging.warning(f"Writing out JSON files and README instructions for setting up your index to {output_directory}")
 +        if not output_directory.exists():
-+            logging.warning(f"{output_directory} does not exist, creating it for you")
++            print(f"{output_directory} does not exist, creating it")
 +            output_directory.mkdir(parents=True)
 +
++        curl_put = 'curl -X PUT -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" -H "Content-Type: application/json"'
 +        readme = {
 +            "ilm": f"""ILM policy ({{filename}}) should be PUT to _ilm/policy/{ilm_policy_name}
 +See: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-ilm-put-lifecycle
 +A default ILM policy was written by condor_adstash, inspect the policy first
-+and then consider adjusting it now or (e.g. via Kibana) later.""",
++and then consider adjusting it now or (e.g. via Kibana) later.
++  {curl_put} "${{ELASTIC_BASE_URL}}/_ilm/policy/{ilm_policy_name}" -d @{{filename}}""",
 +            "template": f"""Index template ({{filename}}) should be PUT to _index_template/{self.index_template_name}
-+See: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-put-index-template""",
++See: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-put-index-template
++  {curl_put} "${{ELASTIC_BASE_URL}}/_index_template/{self.index_template_name}" -d @{{filename}}""",
 +            "index": f"""Initial index ({{filename}}) should be PUT to {index_name}
-+See: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-create"""
++See: https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-create
++  {curl_put} "${{ELASTIC_BASE_URL}}/{index_name}" -d @{{filename}}"""
 +        }
 +        readme_path = output_directory / "README"
 +        if readme_path.exists():
-+            raise IOError(f"{readme_path} already exists, please specify an empty directory.")
++            print(f"ERROR: {readme_path} already exists, please specify an empty directory.", file=sys.stderr)
++            return
 +        with readme_path.open("w") as f:
 +            if len(files) > 1:
 +                f.write("""IMPORTANT: These operations should be done in order!
 +Failure to do so may result in templates and ILM policies not applying.\n\n""")
 +            for obj_type in ["ilm", "template", "index"]:
 +                if obj_type in files:
-+                    f.write(readme[obj_type].format(filename=files[obj_type]["name"]))
++                    f.write(readme[obj_type].replace("{filename}", files[obj_type]["name"]))
 +                    f.write("\n\n")
++            if use_alias:
++                f.write(f"NOTE: Since aliases are enabled, the index can be referenced as {self.alias}\n")
++                f.write(f"instead of {index_name} when querying or configuring condor_adstash.\n")
 +
 +        for obj in files.values():
 +            file_path = output_directory / obj["name"]
 +            if file_path.exists():
-+                raise IOError(f"{file_path} already exists, please specify an empty directory.")
++                print(f"ERROR: {file_path} already exists, please specify an empty directory.", file=sys.stderr)
++                return
 +            with file_path.open("w") as f:
 +                json.dump(obj["contents"], f, indent=2)
 +
-+        logging.warning(f"Index setup files written to {output_directory}")
-+        logging.warning("Remember to remove --init_index before running condor_adstash after setting up your index")
++        print(f"Index setup files written to {output_directory}")
++        print("Remember to remove --init_index before running condor_adstash after setting up your index.")
+diff --git a/src/condor_scripts/adstash/utils.py b/src/condor_scripts/adstash/utils.py
+index d81229808c..0d97549a72 100644
+--- a/src/condor_scripts/adstash/utils.py
++++ b/src/condor_scripts/adstash/utils.py
+@@ -24,6 +24,7 @@ import tempfile
+ import logging.handlers
+ 
+ import htcondor2 as htcondor
++import classad2 as classad
+ 
+ from pathlib import Path
+ 
+@@ -53,6 +54,8 @@ def get_schedds(args):
+         for schedd in schedds:
+             if args.schedds and not (schedd["Name"] in args.schedds.split(",")):
+                 continue
++            if args.ignore_schedds and schedd["Name"] in args.ignore_schedds.split(","):
++                continue
+             schedd["MyPool"] = host
+             try:
+                 schedd_ads[schedd["Name"]] = schedd
+@@ -94,6 +97,8 @@ def get_startds(args=None):
+                 machine = slot_ad["Machine"]
+                 if machine in startd_ads or (startd_allow_list is not None and machine not in startd_allow_list):
+                     continue
++                if args.ignore_startds and machine in args.ignore_startds.split(","):
++                    continue
+ 
+                 # Remote history bindings only exist in startds running 8.9.7+
+                 version = tuple(int(x) for x in slot_ad["CondorVersion"].split()[1].split("."))
+@@ -149,28 +154,42 @@ def set_up_logging(args):
+     if args.log_file is not None:
+         log_path = Path(args.log_file)
+ 
+-        # Make sure the parent directory exists
+-        if not log_path.parent.exists():
+-            logging.debug(f"Attempting to create {log_path.parent}")
+-            try:
+-                log_path.parent.mkdir(parents=True)
+-            except Exception:
+-                logging.exception(
+-                    f"Error while creating log file directory {log_path.parent}"
+-                )
+-                sys.exit(1)
+-
+-        filehandler = logging.handlers.RotatingFileHandler(
+-            args.log_file, maxBytes=100000
+-        )
++        try:
++            log_path.parent.mkdir(parents=True, exist_ok=True)
++        except Exception:
++            logging.exception(
++                f"Could not create log file directory {log_path.parent}"
++            )
++            logging.error(
++                "Try setting the log directory with --log_file or the ADSTASH_LOG config knob"
++            )
++            sys.exit(1)
++
++        try:
++            filehandler = logging.handlers.RotatingFileHandler(
++                args.log_file, maxBytes=100000
++            )
++        except Exception:
++            logging.exception(
++                f"Could not open log file {log_path}"
++            )
++            logging.error(
++                "Try setting the log file with --log_file or the ADSTASH_LOG config knob"
++            )
++            sys.exit(1)
++
+         filehandler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+         logger.addHandler(filehandler)
+ 
+-    # Check if logging to stdout is worthwhile
+-    if os.isatty(sys.stdout.fileno()):
+-        streamhandler = logging.StreamHandler(stream=sys.stdout)
+-        streamhandler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+-        logger.addHandler(streamhandler)
++    # Log to stdout unless suppressed by --quiet.
++    # Guard against stdout objects that don't support fileno() (e.g. StringIO in tests).
++    if not getattr(args, "quiet", False):
++        try:
++            streamhandler = logging.StreamHandler(stream=sys.stdout)
++            streamhandler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
++            logger.addHandler(streamhandler)
++        except Exception:
++            pass
+ 
+ 
+ def collect_process_metadata():
+@@ -216,3 +235,25 @@ def atomic_write(data, filepath):
+             os.unlink(tmpfile.name)
+         except Exception:
+             pass
++
++
++def classad_json_serializer(obj):
++    # convert ClassAds to dict
++    if isinstance(obj, classad.ClassAd):
++        out = {}
++        for k in obj:
++            # explicitly convert Error and Undefined to None
++            # (otherwise they will get serialized to ints)
++            v = obj.eval(k)
++            if isinstance(obj.eval(k), classad.Value):
++                out[k] = None
++            else:
++                out[k] = v
++        return out
++    # convert ExprTrees to their string repr
++    if isinstance(obj, classad.ExprTree):
++        return str(obj)
++    # convert Error and Undefined to None
++    if isinstance(obj, classad.Value):
++        return None
++    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 diff --git a/src/condor_scripts/condor_adstash b/src/condor_scripts/condor_adstash
-index a2a68a1dbf..c799fbdd8b 100755
+index a2a68a1dbf..4c58c6a45d 100755
 --- a/src/condor_scripts/condor_adstash
 +++ b/src/condor_scripts/condor_adstash
 @@ -29,7 +29,7 @@ import htcondor2 as htcondor
@@ -4716,3 +5224,29 @@ index a2a68a1dbf..c799fbdd8b 100755
  from adstash.utils import set_up_logging
  from adstash.config import get_config
  
+@@ -69,6 +69,12 @@ def main():
+     # custom ad file implies standalone mode
+     args.standalone = args.standalone or (args.read_ad_file is not None)
+ 
++    # Handle --init_index mode: write JSON files and exit
++    if args.init_index:
++        from adstash.index_setup import init_index
++        init_index(ad_type=args.init_ad_type, args=args)
++        sys.exit(0)
++
+     # set up logging
+     set_up_logging(args)
+ 
+diff --git a/src/condor_utils/param_info.in b/src/condor_utils/param_info.in
+index 5ae9458afe..77a6db5ba7 100644
+--- a/src/condor_utils/param_info.in
++++ b/src/condor_utils/param_info.in
+@@ -6081,7 +6081,7 @@ default=250
+ [ADSTASH_SE_INDEX_NAME]
+ description=What search engine index should condor_adstash push ads to
+ type=string
+-default=htcondor-000001
++default=htcondor
+ [ADSTASH_SE_LOG_MAPPINGS]
+ description=Should condor_adstash log mappings used with search engine interfaces
+ type=bool
