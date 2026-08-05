@@ -52,7 +52,6 @@ CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 COPY adstash_checkpoint_wrapper.py ${ADSTASH_BIN}/adstash_checkpoint_wrapper.py
 RUN chmod 0755 ${ADSTASH_BIN}/adstash_checkpoint_wrapper.py
 
-
 # set up condor config
 COPY adstash_config ${ADSTASH_CONFIG}
 RUN chown ${ADSTASH_USER}:${ADSTASH_USER} ${ADSTASH_CONFIG}

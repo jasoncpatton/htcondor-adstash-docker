@@ -52,85 +52,91 @@ from adstash.config import get_config
 from adstash.interfaces.elasticsearch import ElasticsearchInterface
 import elasticsearch
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [checkpoint_wrapper] %(levelname)s %(message)s",
-)
 
-# Use the same config parsing as adstash
-args = get_config()
-checkpoint_file = Path(args.checkpoint_file)
-
-if ADSTASH_CHECKPOINT_INDEX == args.se_index_name:
-    logging.critical(
-        f"ADSTASH_CHECKPOINT_INDEX '{ADSTASH_CHECKPOINT_INDEX}' is the same as "
-        f"the adstash target index. Checkpoint docs and adstash docs must not share "
-        f"an index. Set ADSTASH_CHECKPOINT_INDEX to a different value and restart."
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [checkpoint_wrapper] %(levelname)s %(message)s",
     )
-    sys.exit(1)
 
-# Use the adstash ElasticsearchInterface to build ES client
-iface = ElasticsearchInterface(
-    host=args.se_host,
-    url_prefix=getattr(args, "se_url_prefix", ""),
-    username=args.se_username,
-    password=args.se_password,
-    use_https=args.se_use_https,
-    ca_certs=args.se_ca_certs,
-    timeout=args.se_timeout,
-)
-client = iface.get_handle()
+    # Use the same config parsing as adstash
+    args = get_config()
+    checkpoint_file = Path(args.checkpoint_file)
 
-# LOAD CHECKPOINT
-# fetch latest checkpoint from ES, write to checkpoint_file
-try:
-    resp = client.get(index=ADSTASH_CHECKPOINT_INDEX, id="latest")
-    checkpoint_file.write_text(json.dumps(resp["_source"]["checkpoint"]))
-    logging.info(f"Loaded checkpoint from index '{ADSTASH_CHECKPOINT_INDEX}'")
-except elasticsearch.NotFoundError:
-    if checkpoint_file.exists():
-        logging.info(
-            f"No checkpoint found in index '{ADSTASH_CHECKPOINT_INDEX}', "
-            f"using existing checkpoint file at '{checkpoint_file}'"
+    if ADSTASH_CHECKPOINT_INDEX == args.se_index_name:
+        logging.critical(
+            f"ADSTASH_CHECKPOINT_INDEX '{ADSTASH_CHECKPOINT_INDEX}' is the same as "
+            f"the adstash target index. Checkpoint docs and adstash docs must not share "
+            f"an index. Set ADSTASH_CHECKPOINT_INDEX to a different value and restart."
         )
-    else:
-        logging.info(
-            f"No checkpoint found in index '{ADSTASH_CHECKPOINT_INDEX}', starting fresh"
-        )
-        checkpoint_file.write_text("{}")
-except Exception as e:
-    if checkpoint_file.exists():
-        logging.warning(
-            f"Could not load checkpoint from ES: {e}, "
-            f"using existing checkpoint file at '{checkpoint_file}'"
-        )
-    else:
-        logging.warning(
-            f"Could not load checkpoint from ES: {e}, starting fresh"
-        )
-        checkpoint_file.write_text("{}")
+        sys.exit(1)
 
-# RUN condor_adstash
-# subprocess.run() with no stdout/stderr flags inherits the wrapper's file descriptors
-result = subprocess.run(
-    [f"{ADSTASH_BIN}/condor_adstash"] + sys.argv[1:],
-    env=os.environ,
-)
-
-# SAVE CHECKPOINT
-# write the checkpoint file back to ES, both to latest and timestamped docs
-try:
-    checkpoint_data = json.loads(checkpoint_file.read_text())
-    now = datetime.now(timezone.utc).isoformat()
-    doc = {"@timestamp": now, "checkpoint": checkpoint_data}
-    client.index(index=ADSTASH_CHECKPOINT_INDEX, id="latest", document=doc)
-    client.index(
-        index=ADSTASH_CHECKPOINT_INDEX,
-        id=f"checkpoint-{int(time.time())}",
-        document=doc,
+    # Use the adstash ElasticsearchInterface to build ES client
+    iface = ElasticsearchInterface(
+        host=args.se_host,
+        url_prefix=getattr(args, "se_url_prefix", ""),
+        username=args.se_username,
+        password=args.se_password,
+        use_https=args.se_use_https,
+        ca_certs=args.se_ca_certs,
+        timeout=args.se_timeout,
     )
-    logging.info(f"Saved checkpoint to index '{ADSTASH_CHECKPOINT_INDEX}'")
-except Exception as e:
-    logging.error(f"Could not save checkpoint to ES: {e}")
+    client = iface.get_handle()
 
-sys.exit(result.returncode)
+    # LOAD CHECKPOINT
+    # fetch latest checkpoint from ES, write to checkpoint_file
+    try:
+        resp = client.get(index=ADSTASH_CHECKPOINT_INDEX, id="latest")
+        checkpoint_file.write_text(json.dumps(resp["_source"]["checkpoint"]))
+        logging.info(f"Loaded checkpoint from index '{ADSTASH_CHECKPOINT_INDEX}'")
+    except elasticsearch.NotFoundError:
+        if checkpoint_file.exists():
+            logging.info(
+                f"No checkpoint found in index '{ADSTASH_CHECKPOINT_INDEX}', "
+                f"using existing checkpoint file at '{checkpoint_file}'"
+            )
+        else:
+            logging.info(
+                f"No checkpoint found in index '{ADSTASH_CHECKPOINT_INDEX}', starting fresh"
+            )
+            checkpoint_file.write_text("{}")
+    except Exception as e:
+        if checkpoint_file.exists():
+            logging.warning(
+                f"Could not load checkpoint from ES: {e}, "
+                f"using existing checkpoint file at '{checkpoint_file}'"
+            )
+        else:
+            logging.warning(
+                f"Could not load checkpoint from ES: {e}, starting fresh"
+            )
+            checkpoint_file.write_text("{}")
+
+    # RUN condor_adstash
+    # subprocess.run() with no stdout/stderr flags inherits the wrapper's file descriptors
+    result = subprocess.run(
+        [f"{ADSTASH_BIN}/condor_adstash"] + sys.argv[1:],
+        env=os.environ,
+    )
+
+    # SAVE CHECKPOINT
+    # write the checkpoint file back to ES, both to latest and timestamped docs
+    try:
+        checkpoint_data = json.loads(checkpoint_file.read_text())
+        now = datetime.now(timezone.utc).isoformat()
+        doc = {"@timestamp": now, "checkpoint": checkpoint_data}
+        client.index(index=ADSTASH_CHECKPOINT_INDEX, id="latest", document=doc)
+        client.index(
+            index=ADSTASH_CHECKPOINT_INDEX,
+            id=f"checkpoint-{int(time.time())}",
+            document=doc,
+        )
+        logging.info(f"Saved checkpoint to index '{ADSTASH_CHECKPOINT_INDEX}'")
+    except Exception as e:
+        logging.error(f"Could not save checkpoint to ES: {e}")
+
+    sys.exit(result.returncode)
+
+
+if __name__ == "__main__":
+    main()
